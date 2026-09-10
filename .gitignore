@@ -10,5 +10,6 @@ coverage/
 !.env.example
 .turbo/
 .vite/
+.worktrees/
 tmp/
 *.log
