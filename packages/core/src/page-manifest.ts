@@ -9,6 +9,8 @@
  * state and derive export snapshots.
  */
 
+import { SchemaError } from "./schema-error.js";
+
 export const PAGE_MANIFEST_VERSION = 1 as const;
 
 /** Clockwise relative rotation in degrees. 0 means "keep source rotation". */
@@ -37,19 +39,19 @@ export interface PageManifest {
   readonly pages: readonly ManifestPage[];
 }
 
-export type PageManifestErrorCode =
-  | "MANIFEST_INVALID"
-  | "MANIFEST_INVALID_SOURCE_ID"
-  | "MANIFEST_INVALID_PAGE_NUMBER"
-  | "MANIFEST_INVALID_ROTATION"
-  | "MANIFEST_INVALID_INDEX";
+export const PAGE_MANIFEST_ERROR_CODES = [
+  "MANIFEST_INVALID",
+  "MANIFEST_INVALID_SOURCE_ID",
+  "MANIFEST_INVALID_PAGE_NUMBER",
+  "MANIFEST_INVALID_ROTATION",
+  "MANIFEST_INVALID_INDEX"
+] as const;
 
-export class PageManifestError extends Error {
-  constructor(
-    public readonly code: PageManifestErrorCode,
-    message: string
-  ) {
-    super(message);
+export type PageManifestErrorCode = (typeof PAGE_MANIFEST_ERROR_CODES)[number];
+
+export class PageManifestError extends SchemaError<PageManifestErrorCode> {
+  constructor(code: PageManifestErrorCode, message: string) {
+    super(code, message);
     this.name = "PageManifestError";
   }
 }
