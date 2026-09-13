@@ -6,6 +6,12 @@ import { createTempWorkspace } from "./temp-workspace.js";
 import { validatePdfInput } from "./validation.js";
 import { qpdfEngine } from "./engines/qpdf.js";
 import { ghostscriptEngine } from "./engines/ghostscript.js";
+import {
+  defaultNativeRunner,
+  inspectPdfSource,
+  type NativeCallOptions,
+  type NativeRunner
+} from "./engines/qpdf-pages.js";
 import type { CompressionEngine } from "./engines/types.js";
 
 export interface CompressionOptions {
@@ -13,6 +19,10 @@ export interface CompressionOptions {
   outputPath: string;
   profile: CompressionProfileName;
   signal?: AbortSignal;
+  /** Bound on each native inspection call. */
+  timeoutMs?: number;
+  /** Injectable native runner (tests simulate a missing qpdf). */
+  run?: NativeRunner;
   engines?: CompressionEngine[];
 }
 
@@ -38,6 +48,27 @@ export async function compressPdf(options: CompressionOptions): Promise<Compress
   }
 
   const validation = await validatePdfInput(options.inputPath, options.outputPath);
+
+  // KTD9/R21: compression now inspects through qpdf, which it never did
+  // before, and refuses a document carrying form fields — the smaller-wins
+  // comparison is not value-preserving between form-bearing candidates.
+  // That makes qpdf a required dependency: a missing qpdf surfaces as
+  // ENGINE_UNAVAILABLE and an unreadable object graph as
+  // INSPECTION_INCOMPLETE rather than silently degrading.
+  const calls: NativeCallOptions = {
+    run: options.run ?? defaultNativeRunner,
+    signal: options.signal,
+    timeoutMs: options.timeoutMs
+  };
+  const inspection = await inspectPdfSource(options.inputPath, calls);
+  if (inspection.compatWarnings.includes("forms")) {
+    throw new CompressionError(
+      "INPUT_HAS_FORM_FIELDS",
+      "Source PDF carries form fields that compression cannot preserve; burn the values into page content first, then compress.",
+      { inputPath: options.inputPath }
+    );
+  }
+
   const profile = getCompressionProfile(options.profile);
   const engines = options.engines ?? defaultEngines;
   const engine = engines.find((candidate) => candidate.supports(profile));
@@ -75,7 +106,7 @@ export async function compressPdf(options: CompressionOptions): Promise<Compress
       reductionPercent,
       outputSmaller: reductionBytes > 0,
       engine: result.engine,
-      warnings: result.warnings
+      warnings: [...inspection.warnings, ...result.warnings]
     };
   } catch (error) {
     await rmOutputIfCancelled(options.outputPath, error);

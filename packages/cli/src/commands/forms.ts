@@ -5,7 +5,9 @@
  * and re-emits the outstanding entries (KTD8), `apply` runs the approved plan
  * through the core fill operation, `verify` reads the delivered artifact back
  * independently of the writer (R12), and `clean` removes the plan, its receipt
- * and its audit record (R29).
+ * and its audit record (R29). `burn-in` flattens an already-filled interactive
+ * artifact so its values become page content (R36); it writes no new values
+ * and sits outside the approval gate.
  *
  * The approval gate (KTD7, KD2): values reach a document only through a plan
  * file the person approved. `apply` snapshots the plan and the source into a
@@ -30,6 +32,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
   CompressionError,
+  burnInForm,
   checkFormPlan,
   createTempWorkspace,
   fillForm,
@@ -39,6 +42,7 @@ import {
   verifyFormFill,
   FILL_MAX_PLAN_BYTES,
   FILL_MAX_SOURCE_BYTES,
+  type BurnInSummary,
   type FillSummary,
   type FormInventoryResult,
   type FormPlanCheck,
@@ -156,6 +160,13 @@ interface CleanOptions {
   planPath: string;
   receiptPath?: string;
   auditPath?: string;
+  json: boolean;
+}
+
+interface BurnInOptions {
+  sourcePath: string;
+  outputPath: string;
+  overwrite: boolean;
   json: boolean;
 }
 
@@ -303,6 +314,42 @@ export function parseCleanArgs(args: string[]): CleanOptions {
     ...(auditPath !== undefined ? { auditPath } : {}),
     json
   };
+}
+
+/**
+ * The burn-in contract (R36): a filled interactive artifact and a
+ * destination. Unlike apply, the output path is an option — there is no
+ * approved plan to derive it from.
+ */
+export function parseBurnInArgs(args: string[]): BurnInOptions {
+  let sourcePath: string | undefined;
+  let outputPath: string | undefined;
+  let overwrite = false;
+  let json = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token === "--json") {
+      json = true;
+    } else if (token === "--overwrite") {
+      overwrite = true;
+    } else if (token === "--output" || token === "-o") {
+      const value = args[++index];
+      if (!value) throw new Error("Missing value for --output.");
+      outputPath = value;
+    } else if (token.startsWith("--output=")) {
+      outputPath = token.slice("--output=".length);
+      if (!outputPath) throw new Error("Missing value for --output.");
+    } else if (token.startsWith("-")) {
+      throw new Error(`Unknown option: ${token}`);
+    } else if (sourcePath === undefined) {
+      sourcePath = token;
+    } else {
+      throw new Error(`Unexpected positional argument: ${token}`);
+    }
+  }
+  if (!sourcePath) throw new Error("Missing source path.");
+  if (!outputPath) throw new Error("Missing --output path.");
+  return { sourcePath, outputPath, overwrite, json };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1072,6 +1119,40 @@ async function runFormsClean(args: string[], deps: FormsCommandDeps): Promise<Cl
   };
 }
 
+/**
+ * Standalone burn-in (U12): no receipt, no snapshot workspace — the command
+ * introduces no values, so the approval gate does not apply. The core
+ * operation still admits through the same empty-password inspection,
+ * regenerates appearances before flattening and refuses blank delivery.
+ */
+async function runFormsBurnIn(args: string[], deps: FormsCommandDeps): Promise<CliResult> {
+  let options: BurnInOptions;
+  try {
+    options = parseBurnInArgs(args);
+  } catch (error) {
+    return usageFailure(args, error, formsUsage());
+  }
+  try {
+    const summary: BurnInSummary = await burnInForm({
+      sourcePath: resolve(options.sourcePath),
+      destinationPath: resolve(options.outputPath),
+      overwrite: options.overwrite,
+      signal: deps.signal,
+      workspaceParent: deps.workspaceParent,
+      run: deps.run
+    });
+    const payload = { status: "burned-in" as const, ...summary };
+    if (options.json) return { exitCode: 0, stdout: formatJsonSuccess(payload), stderr: "" };
+    return {
+      exitCode: 0,
+      stdout: `Burned in ${summary.outputPath} (${summary.outputBytes} bytes, ${summary.fieldsBurnedIn} ${summary.fieldsBurnedIn === 1 ? "field" : "fields"})\n`,
+      stderr: summary.warnings.length ? `${summary.warnings.join("\n")}\n` : ""
+    };
+  } catch (error) {
+    return failure(options.json, error);
+  }
+}
+
 async function exists(path: string): Promise<boolean> {
   try {
     await stat(path);
@@ -1094,6 +1175,8 @@ export async function runFormsCommand(args: string[], deps: FormsCommandDeps = {
       return runFormsVerify(rest, deps);
     case "clean":
       return runFormsClean(rest, deps);
+    case "burn-in":
+      return runFormsBurnIn(rest, deps);
     default: {
       const error = new Error(
         subcommand === undefined ? "Missing forms subcommand." : `Unknown forms subcommand: ${subcommand}`
@@ -1111,6 +1194,7 @@ export function formsUsage(): string {
     "  pdf-compressor forms apply <plan.json> [--receipt <receipt.json>] [--json]",
     "  pdf-compressor forms verify <output.pdf> --plan <plan.json> [--reveal-values] [--json]",
     "  pdf-compressor forms clean <plan.json> [--receipt <path>] [--audit <path>] [--json]",
+    "  pdf-compressor forms burn-in <source.pdf> --output <output.pdf> [--overwrite] [--json]",
     ""
   ].join("\n");
 }

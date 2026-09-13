@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { parseCompressArgs, runCompressCommand } from "../src/commands/compress.js";
+import { buildTestPdf } from "../../core/test/pdf-fixtures.js";
 
 describe("parseCompressArgs", () => {
   it("parses the agent-facing compression contract", () => {
@@ -70,6 +71,21 @@ describe("parseCompressArgs", () => {
       expect(result.exitCode).toBe(4);
       expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, code: "JOB_CANCELLED" });
       expect(await readFile(output, "utf8")).toBe("already here");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a form-bearing PDF with its own code", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pdf-compressor-cli-test-"));
+    const formPath = join(dir, "form.pdf");
+    try {
+      await writeFile(formPath, buildTestPdf([{}], { formTextField: true }));
+      const result = await runCompressCommand([formPath, "--output", join(dir, "out.pdf"), "--json"]);
+      expect(result.exitCode).toBe(2);
+      const payload = JSON.parse(result.stdout) as { ok: boolean; code: string; message: string };
+      expect(payload).toMatchObject({ ok: false, code: "INPUT_HAS_FORM_FIELDS" });
+      expect(payload.message).toContain("burn");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

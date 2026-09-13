@@ -197,6 +197,28 @@ describe("hardened compression route", () => {
     }
   });
 
+  it("refuses a form-bearing upload and names burn-in as the way forward", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const formPath = await writeTestPdf(scratch, "form.pdf", [{}], { formTextField: true });
+    const input = await readFile(formPath);
+    const auth = await launch();
+    const result = await call("/api/compress?profile=balanced", {
+      method: "POST",
+      headers: {
+        origin: auth.origin,
+        cookie: auth.cookie,
+        "x-launch-token": auth.token,
+        "content-type": "application/pdf",
+        "content-length": String(input.length)
+      },
+      body: input
+    });
+    expect(result.status).toBe(422);
+    const payload = JSON.parse(result.body.toString("utf8")) as { ok: boolean; code: string; message: string };
+    expect(payload).toMatchObject({ ok: false, code: "INPUT_HAS_FORM_FIELDS" });
+    expect(payload.message.toLowerCase()).toContain("burn");
+  });
+
   it("does not expose temporary local paths in web summaries", () => {
     expect(
       toPublicSummary({

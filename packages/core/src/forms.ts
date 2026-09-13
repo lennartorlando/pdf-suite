@@ -140,6 +140,37 @@ export interface FillSummary {
   compatWarnings: CompatWarningKind[];
 }
 
+export interface BurnInFormOptions {
+  /** Absolute path of the already-filled interactive PDF; never written. */
+  sourcePath: string;
+  /** Absolute path of the flattened destination; never clobbered unless overwrite. */
+  destinationPath: string;
+  /** An existing destination refuses the write unless explicitly allowed. */
+  overwrite?: boolean;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  /** Flattened candidate cap; defaults to the initial safety limit. */
+  maxOutputBytes?: number;
+  workspaceParent?: string;
+  resourceCheck?: (additionalBytes?: number) => Promise<void>;
+  run?: NativeRunner;
+}
+
+export interface BurnInSummary {
+  outputPath: string;
+  outputBytes: number;
+  pageCount: number;
+  /** Logical fields flattened into page content. */
+  fieldsBurnedIn: number;
+  removedRestrictions: boolean;
+  removedUsageRights: boolean;
+  qpdfVersion: string;
+  /** sha256 of the source, unchanged across the operation. */
+  sourceHash: string;
+  warnings: string[];
+  compatWarnings: CompatWarningKind[];
+}
+
 /** One widget joined across both tools. */
 interface JoinedWidget {
   widgetId: string;
@@ -978,6 +1009,38 @@ function assertAppearancesPresent(raw: QpdfJson, answered: Map<string, JoinedFie
   }
 }
 
+/**
+ * Standalone blank-delivery guard (KTD9, AE11): no plan exists, so "must
+ * show something" is derived from the document itself — a button widget
+ * selected to a non-Off state, or any other field holding a value. Each
+ * such widget needs an appearance stream on its own dictionary or the field
+ * dictionary it shares after --generate-appearances; a hidden widget shows
+ * nothing either way and needs none.
+ */
+function assertGeneratedAppearances(raw: QpdfJson): void {
+  for (const row of raw.acroform?.fields ?? []) {
+    const flags = row.annotation?.annotationflags ?? 0;
+    if ((flags & (ANNOT_FLAG_HIDDEN | ANNOT_FLAG_NO_VIEW)) !== 0) continue;
+    const widgetRef = rowWidgetRef(row);
+    if (widgetRef === undefined) continue;
+    const needed =
+      row.fieldtype === "/Btn"
+        ? appearanceName(row.annotation?.appearancestate) !== "Off"
+        : decodeQpdfText(row.value) !== "";
+    if (!needed) continue;
+    const fieldRef = rowFieldRef(row);
+    const widgetDict = objectDict(raw, widgetRef);
+    const fieldDict = fieldRef === undefined ? undefined : objectDict(raw, fieldRef);
+    if (!widgetDict?.["/AP"] && !fieldDict?.["/AP"]) {
+      throw new CompressionError(
+        "FILL_APPEARANCE_MISSING",
+        "No appearance could be generated for a field holding a value; burning in would deliver a blank.",
+        { fieldId: fieldRef ?? widgetRef }
+      );
+    }
+  }
+}
+
 function outputTooLarge(path: string, maxOutputBytes: number): CompressionError {
   return new CompressionError(
     "OUTPUT_TOO_LARGE",
@@ -1431,6 +1494,139 @@ export async function fillForm(options: FillFormOptions): Promise<FillSummary> {
       fieldsWritten: answered.size,
       placementsWritten: plan.entries.filter((entry) => entry.kind !== "field").length,
       computedFields,
+      removedRestrictions: admission.removedRestrictions,
+      removedUsageRights: admission.removedUsageRights,
+      qpdfVersion,
+      sourceHash,
+      warnings,
+      compatWarnings: inspection.compatWarnings
+    };
+  } finally {
+    await rm(stagingPath, { force: true });
+    await workspace.cleanup();
+  }
+}
+
+/**
+ * Standalone burn-in (R36, KTD9): flatten an already-filled interactive
+ * artifact so its field values become page content, using the same
+ * machinery as the fill operation's burn-in tail — empty-password
+ * admission, field-action removal, appearance regeneration, the
+ * blank-delivery guard, flattening, the strict gate and no-clobber
+ * publication. There is no plan, so the appearance guard derives "must show
+ * something" from the document itself rather than from approved values.
+ */
+export async function burnInForm(options: BurnInFormOptions): Promise<BurnInSummary> {
+  assertNotAborted(options.signal);
+  const scan = await validatePdfFillInput(options.sourcePath);
+  if (scan.sizeBytes > FILL_MAX_SOURCE_BYTES) {
+    throw new CompressionError(
+      "FILL_INPUT_TOO_LARGE",
+      `Source PDF exceeds the ${FILL_MAX_SOURCE_BYTES} byte fill limit.`,
+      { inputPath: options.sourcePath, sizeBytes: scan.sizeBytes }
+    );
+  }
+  const sourceHash = await hashFile(options.sourcePath);
+  let clearDestination = false;
+  try {
+    await assertFreshDestination(options.destinationPath, [options.sourcePath]);
+  } catch (error) {
+    if (!options.overwrite || !isCompressionError(error) || error.code !== "OUTPUT_EXISTS") throw error;
+    clearDestination = true;
+  }
+
+  const maxOutputBytes = options.maxOutputBytes ?? FILL_MAX_OUTPUT_BYTES;
+  const calls: NativeCallOptions = {
+    run: options.run ?? defaultNativeRunner,
+    signal: options.signal,
+    timeoutMs: options.timeoutMs
+  };
+  const qpdfVersion = await getQpdfVersion(calls);
+  assertNativeFloor("qpdf", qpdfVersion, QPDF_SECURITY_FLOOR);
+
+  const workspace = await createTempWorkspace("pdf-burn-in-", options.workspaceParent);
+  const stagingPath = join(dirname(options.destinationPath), `.pdf-burn-in-staging-${randomUUID()}.pdf`);
+  try {
+    const admission = await admitFillSource(options.sourcePath, workspace.path, calls);
+    const sourceJson = await readQpdfJson(admission.workingPath, calls);
+    const update = planFieldActionRemoval(sourceJson.raw);
+    let updateJsonPath: string | undefined;
+    if (Object.keys(update.objects).length > 0) {
+      updateJsonPath = workspace.file("field-action-update.json");
+      await writeFile(updateJsonPath, serializeFieldActionUpdate(update), { mode: 0o600 });
+    }
+
+    const stagePath = workspace.file("appearances.pdf");
+    const stageWarnings = await withOutputLimit(
+      stagePath,
+      calls,
+      maxOutputBytes,
+      outputTooLarge,
+      (limitedCalls) =>
+        runFillOutputStage(
+          {
+            inputPath: admission.workingPath,
+            outputPath: stagePath,
+            ...(updateJsonPath ? { updateJsonPath } : {}),
+            generateAppearances: true
+          },
+          limitedCalls
+        ),
+      options.resourceCheck
+    );
+
+    const stageJson = await readQpdfJson(stagePath, calls);
+    assertGeneratedAppearances(stageJson.raw);
+
+    const flatPath = workspace.file("flattened.pdf");
+    const flatWarnings = await withOutputLimit(
+      flatPath,
+      calls,
+      maxOutputBytes,
+      outputTooLarge,
+      (limitedCalls) =>
+        runFillOutputStage({ inputPath: stagePath, outputPath: flatPath, flatten: true }, limitedCalls),
+      options.resourceCheck
+    );
+
+    const inspection = await validatePdfArtifact(flatPath, admission.inspection.pageCount, calls);
+    const warnings = [
+      ...admission.inspection.warnings,
+      ...sourceJson.warnings,
+      ...stageWarnings,
+      ...stageJson.warnings,
+      ...flatWarnings,
+      ...inspection.warnings
+    ];
+    // The operation's contract: no form fields may survive flattening.
+    if (inspection.compatWarnings.includes("forms")) {
+      throw new CompressionError("OUTPUT_INVALID", "The flattened file still carries form fields.", {
+        outputPath: flatPath
+      });
+    }
+    const fieldsBurnedIn = new Set(
+      (stageJson.raw.acroform?.fields ?? [])
+        .map((row) => rowFieldRef(row))
+        .filter((ref): ref is string => ref !== undefined)
+    ).size;
+
+    if (clearDestination) await unlink(options.destinationPath);
+    await options.resourceCheck?.((await stat(flatPath)).size);
+    await copyFile(flatPath, stagingPath);
+    await options.resourceCheck?.(0);
+    await publishNoClobber(stagingPath, options.destinationPath);
+    const outputStat = await stat(options.destinationPath);
+    if ((await hashFile(options.sourcePath)) !== sourceHash) {
+      throw new CompressionError("ENGINE_FAILED", "The source changed during the burn-in operation.", {
+        inputPath: options.sourcePath
+      });
+    }
+
+    return {
+      outputPath: options.destinationPath,
+      outputBytes: outputStat.size,
+      pageCount: inspection.pageCount,
+      fieldsBurnedIn,
       removedRestrictions: admission.removedRestrictions,
       removedUsageRights: admission.removedUsageRights,
       qpdfVersion,

@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { fillForm, inventoryFormFields, type FillFormOptions, type FillSummary } from "../src/forms.js";
+import { burnInForm, fillForm, inventoryFormFields, type FillFormOptions, type FillSummary } from "../src/forms.js";
 import { FormPlanError, serializeFormPlan, parseFormPlan, type FormPlanEntry } from "../src/form-plan.js";
 import { defaultNativeRunner, type NativeRunner } from "../src/engines/qpdf-pages.js";
 import { outputContainsMarker, readFieldRows } from "../../../tests/helpers/pdf-assertions.js";
@@ -562,6 +562,55 @@ describe("fillForm terminal-state hygiene", () => {
       fillForm({ sourcePath: source, planPath, destinationPath: outputPath, timeoutMs: 1, workspaceParent })
     ).rejects.toMatchObject({ code: "JOB_TIMEOUT" });
     await expect(stat(outputPath)).rejects.toThrow();
+    await workspaceIsEmpty();
+  });
+});
+
+describe("burnInForm (standalone burn-in, U12)", () => {
+  it("burns a filled interactive artifact into page content and leaves no fields", async () => {
+    const source = await writeSource("burn-src", { formTextField: true, formCheckbox: true });
+    const { inventory } = await inventoryFormFields(source, { workspaceParent });
+    const entries = inventory.fields.map((field): FormPlanEntry => ({
+      kind: "field",
+      fieldId: field.fieldId,
+      status: "answered",
+      value: field.type === "checkbox" ? "Ja" : "burned-value"
+    }));
+    const { outputPath: interactive } = await fill(source, entries);
+    const interactiveHash = await sha256File(interactive);
+
+    const flatPath = join(scratch, `${unique("flat")}.pdf`);
+    const summary = await burnInForm({
+      sourcePath: interactive,
+      destinationPath: flatPath,
+      workspaceParent
+    });
+
+    expect(summary.fieldsBurnedIn).toBe(2);
+    expect(await outputContainsMarker(flatPath, "burned-value")).toBe(true);
+    const { inventory: after } = await inventoryFormFields(flatPath, { workspaceParent });
+    expect(after.fields).toHaveLength(0);
+    // The source artifact is read, never rewritten.
+    expect(await sha256File(interactive)).toBe(interactiveHash);
+    await workspaceIsEmpty();
+  });
+
+  it("fails rather than delivering a blank when appearances were never generated", async () => {
+    const source = await writeSource("burn-noap", {
+      formTextField: true,
+      formPrefilledText: "PREFILL-U12",
+      needAppearances: true
+    });
+    const flatPath = join(scratch, `${unique("flat")}.pdf`);
+    // Simulate an artifact appearance generation cannot cover: the flag is
+    // stripped, so no /AP is ever built for the value-bearing field.
+    const noAppearanceRun: NativeRunner = (command, args, options) =>
+      defaultNativeRunner(command, args.filter((arg) => arg !== "--generate-appearances"), options);
+
+    await expect(
+      burnInForm({ sourcePath: source, destinationPath: flatPath, workspaceParent, run: noAppearanceRun })
+    ).rejects.toMatchObject({ code: "FILL_APPEARANCE_MISSING" });
+    await expect(stat(flatPath)).rejects.toThrow();
     await workspaceIsEmpty();
   });
 });

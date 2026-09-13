@@ -333,3 +333,39 @@ describe("forms verify", () => {
     expect((JSON.parse(result.stdout) as { code: string }).code).toBe("FILL_PLAN_SOURCE_MISMATCH");
   });
 });
+
+describe("forms burn-in", () => {
+  it("flattens a filled interactive artifact and reports the summary", async () => {
+    const source = await writeSource("burn-cli", { formTextField: true });
+    const fields = await inventoryOf(source);
+    const { planPath, destPath } = await writePlan("burn-cli", source, [
+      { kind: "field", fieldId: fieldIdByLabel(fields, "fixture-name"), status: "answered", value: "CLI-BURN" }
+    ]);
+    const receiptPath = await approvePlan(planPath, source);
+    const applied = await runFormsCommand(["apply", planPath, "--receipt", receiptPath, "--json"], deps());
+    expect(applied.exitCode).toBe(0);
+
+    const flatPath = join(scratch, "burn-cli-flat.pdf");
+    const result = await runFormsCommand(["burn-in", destPath, "--output", flatPath, "--json"], deps());
+    expect(result.exitCode).toBe(0);
+    const payload = JSON.parse(result.stdout) as {
+      ok: boolean;
+      status: string;
+      fieldsBurnedIn: number;
+      pageCount: number;
+      outputPath: string;
+    };
+    expect(payload).toMatchObject({ ok: true, status: "burned-in", fieldsBurnedIn: 1, pageCount: 1 });
+    expect(payload.outputPath).toBe(flatPath);
+    expect(await inventoryOf(flatPath)).toHaveLength(0);
+  });
+
+  it("refuses an existing destination without --overwrite", async () => {
+    const source = await writeSource("burn-cli-exists", { formTextField: true });
+    const flatPath = join(scratch, "burn-cli-exists-flat.pdf");
+    await writeFile(flatPath, "already here");
+    const result = await runFormsCommand(["burn-in", source, "--output", flatPath, "--json"], deps());
+    expect(result.exitCode).toBe(2);
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, code: "OUTPUT_EXISTS" });
+  });
+});

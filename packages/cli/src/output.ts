@@ -27,6 +27,7 @@ export const exitCodeByErrorCode: Readonly<Record<CompressionErrorCode, number>>
   INPUT_SIGNED: exitCodes.validationFailure,
   INPUT_XFA: exitCodes.validationFailure,
   INPUT_HAS_ACTIVE_CONTENT: exitCodes.validationFailure,
+  INPUT_HAS_FORM_FIELDS: exitCodes.validationFailure,
   INSPECTION_INCOMPLETE: exitCodes.compressionFailure,
   OUTPUT_INVALID: exitCodes.validationFailure,
   OUTPUT_TOO_LARGE: exitCodes.validationFailure,

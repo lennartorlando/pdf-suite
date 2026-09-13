@@ -17,6 +17,7 @@ pdf-compressor forms validate <plan.json> [--reveal-values] [--json]
 pdf-compressor forms apply <plan.json> [--receipt <receipt.json>] [--json]
 pdf-compressor forms verify <output.pdf> --plan <plan.json> [--reveal-values] [--json]
 pdf-compressor forms clean <plan.json> [--receipt <path>] [--audit <path>] [--json]
+pdf-compressor forms burn-in <source.pdf> --output <output.pdf> [--overwrite] [--json]
 ```
 
 ### `inspect`
@@ -127,6 +128,15 @@ approved. Field values never appear on stdout by default: `fields` reports
 - `clean <plan.json>` removes the plan, its derived receipt and its audit
   record (`--receipt`/`--audit` override the derived paths). The nonce ledger
   is deliberately not cleaned: a spent approval stays spent.
+- `burn-in <source.pdf> --output <output.pdf>` flattens an already-filled
+  interactive artifact so its field values become page content (R36): qpdf
+  regenerates appearances first, then flattens every annotation, and a
+  widget whose appearance cannot be generated fails with
+  `FILL_APPEARANCE_MISSING` instead of delivering a blank page. The command
+  introduces no values, so it sits outside the approval gate — there is no
+  plan and no receipt. The destination follows the same no-clobber and
+  explicit `--overwrite` contract as the other file-producing commands, and
+  the delivered artifact carries no form fields.
 
 Signature placements are refused by both `validate` and `apply` with
 `FILL_SIGNATURE_FORBIDDEN`: signing is reserved to the person.
@@ -168,6 +178,9 @@ Successful output includes `ok: true` plus the command payload:
 - `forms verify`: `status`, `outputPath`, per-entry `fields` and
   `placements` verdicts (digested unless `--reveal-values`), `warnings`.
 - `forms clean`: `status`, `removed`, and `failed` paths when any.
+- `forms burn-in`: `status`, `outputPath`, `outputBytes`, `pageCount`,
+  `fieldsBurnedIn`, `sourceHash`, `qpdfVersion`, `warnings`,
+  `compatWarnings`.
 
 Failures include:
 

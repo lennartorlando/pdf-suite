@@ -29,6 +29,7 @@ function sanitizeCompressError(error: unknown): { status: number; code: string }
       case "INPUT_NOT_FOUND":
       case "INPUT_NOT_PDF":
       case "INPUT_ENCRYPTED":
+      case "INPUT_HAS_FORM_FIELDS":
         return { status: 422, code: error.code };
       case "ENGINE_UNAVAILABLE":
       case "NATIVE_VERSION_UNSUPPORTED":
@@ -195,16 +196,19 @@ async function runCompressWork(
     };
   } catch (error) {
     const mapped = sanitizeCompressError(error);
+    // U12: a form-bearing refusal must name the way forward, not just fail.
     const message =
       mapped.code === "UPLOAD_ABORTED"
         ? "Upload was interrupted."
-        : mapped.status === 499
-          ? "Compression was cancelled."
-          : mapped.status === 504
-            ? "Compression exceeded its runtime budget."
-            : mapped.status >= 500
-              ? "Compression failed."
-              : "Compression was rejected.";
+        : mapped.code === "INPUT_HAS_FORM_FIELDS"
+          ? "This PDF carries form fields that compression cannot preserve. Burn the field values into the page first, then compress the result."
+          : mapped.status === 499
+            ? "Compression was cancelled."
+            : mapped.status === 504
+              ? "Compression exceeded its runtime budget."
+              : mapped.status >= 500
+                ? "Compression failed."
+                : "Compression was rejected.";
     return fail(mapped.status, mapped.code, message);
   }
 }

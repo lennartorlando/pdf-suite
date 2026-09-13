@@ -179,6 +179,7 @@ export function sanitizeExportError(error: unknown): { status: number; code: str
       case "INPUT_SIGNED":
       case "INPUT_XFA":
       case "INPUT_HAS_ACTIVE_CONTENT":
+      case "INPUT_HAS_FORM_FIELDS":
       case "INSPECTION_INCOMPLETE":
       case "OUTPUT_INVALID":
       case "OUTPUT_TOO_LARGE":

@@ -75,6 +75,7 @@ export {
 export { ghostscriptArgs } from "./engines/ghostscript.js";
 export {
   fillForm,
+  burnInForm,
   inventoryFormFields,
   checkFormPlan,
   verifyFormFill,
@@ -83,6 +84,8 @@ export {
   FILL_MAX_PLAN_BYTES,
   type FillFormOptions,
   type FillSummary,
+  type BurnInFormOptions,
+  type BurnInSummary,
   type InspectFormOptions,
   type FormInventoryResult,
   type FormPlanCheck,
