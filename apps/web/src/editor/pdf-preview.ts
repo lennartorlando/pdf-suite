@@ -15,11 +15,11 @@
  * real canvas and it no-ops when no 2D context exists.
  */
 
-import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
+import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist/types/src/pdf.js";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import { PDFJS_PINNED_VERSION } from "@pdf-compressor/core/pdfjs-version";
 
-/** Exact pinned PDF.js release served locally with its matching worker. */
-export const PDFJS_PINNED_VERSION = "6.3.289";
+export { PDFJS_PINNED_VERSION };
 
 /** At most two concurrent thumbnail render tasks. */
 export const MAX_CONCURRENT_RENDER_TASKS = 2;
@@ -132,11 +132,7 @@ interface RealPdfJsApi {
 }
 
 async function configurePdfJs(): Promise<RealPdfJsApi> {
-  const pdfJs = (await import("pdfjs-dist")) as unknown as {
-    getDocument(params: SecureDocumentParams): { promise: Promise<PDFDocumentProxy>; destroy(): Promise<void> };
-    GlobalWorkerOptions: { workerSrc: string };
-    version?: string;
-  };
+  const pdfJs = await import("pdfjs-dist/build/pdf.min.mjs");
   if (typeof pdfJs.version === "string" && pdfJs.version !== PDFJS_PINNED_VERSION) {
     throw new Error(
       `Mismatched PDF.js release ${pdfJs.version}; expected local ${PDFJS_PINNED_VERSION}.`

@@ -15,7 +15,8 @@ The project starts with AGPL-3.0-or-later to keep the repository compatible with
 
 | Package | Version | Purpose | License |
 |---|---|---|---|
-| `pdfjs-dist` | 6.3.289 (exact pin) | Lazy local thumbnail rendering with a version-matched worker; scripting and dynamic evaluation disabled | Apache-2.0 |
+| `pdfjs-dist` | 6.3.289 (exact pin) | Lazy local thumbnail rendering with a version-matched worker, plus the bounded fill child that writes filled/signed documents in Node; declared in both the core and web manifests (~35 MB unpacked) | Apache-2.0 |
+| `@napi-rs/canvas` | 1.0.8 (transitive) | Optional `pdfjs-dist` native canvas dependency, resolved in the lockfile with platform binaries; unused by the Node fill child, which has no canvas — image stamping is deferred | MIT |
 | `@fastify/busboy` | 3.2.2 (exact pin) | Streaming multipart parser for the page-export route; no file-sized buffers | MIT |
 
 ## Current Distribution Decision

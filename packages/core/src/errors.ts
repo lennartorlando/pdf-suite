@@ -26,6 +26,7 @@ export type CompressionErrorCode =
   | "ENGINE_UNAVAILABLE"
   | "ENGINE_FAILED"
   | "PUBLISH_FAILED"
+  | "FILL_CHILD_OUT_OF_MEMORY"
   | "JOB_CANCELLED"
   | "JOB_TIMEOUT";
 

@@ -218,7 +218,9 @@ describe("browser-safe boundary", () => {
       "packages/core/src/schema-error.ts",
       "packages/core/src/page-manifest.ts",
       "packages/core/src/form-plan.ts",
-      "packages/core/src/form-inventory.ts"
+      "packages/core/src/form-inventory.ts",
+      "packages/core/src/ocr-contract.ts",
+      "packages/core/src/pdfjs-version.ts"
     ]) {
       const source = readFileSync(file, "utf8");
       const specifiers = [...source.matchAll(specifierPattern)].flatMap((match) =>

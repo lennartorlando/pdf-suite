@@ -1,8 +1,8 @@
 import type { CompressionProfileName } from "../profiles.js";
 import type { PageManifest } from "@pdf-compressor/core/page-manifest";
-import type { OcrLanguage, OcrMetadata, OcrOptions } from "@pdf-compressor/core";
+import type { OcrLanguage, OcrMetadata, OcrOptions } from "@pdf-compressor/core/ocr-contract";
 
-export type { OcrLanguage, OcrMetadata } from "@pdf-compressor/core";
+export type { OcrLanguage, OcrMetadata } from "@pdf-compressor/core/ocr-contract";
 
 export interface CompressionResponse {
   ok: boolean;

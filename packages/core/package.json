@@ -28,7 +28,18 @@
     "./native-floors": {
       "types": "./dist/native-floors.d.ts",
       "import": "./dist/native-floors.js"
+    },
+    "./ocr-contract": {
+      "types": "./dist/ocr-contract.d.ts",
+      "import": "./dist/ocr-contract.js"
+    },
+    "./pdfjs-version": {
+      "types": "./dist/pdfjs-version.d.ts",
+      "import": "./dist/pdfjs-version.js"
     }
+  },
+  "dependencies": {
+    "pdfjs-dist": "6.3.289"
   },
   "scripts": {
     "build": "tsc -b tsconfig.json",

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QPDF_SECURITY_FLOOR } from "@pdf-compressor/core/native-floors";
 import { resetAuthStateForTests } from "../src/api/client.js";
@@ -550,9 +551,6 @@ describe("qpdf setup guidance", () => {
     expect(QPDF_SECURITY_FLOOR).toBe("12.4.1");
     const editorSource = readFileSync("apps/web/src/components/PageEditor.ts", "utf8");
     expect(editorSource).toContain("@pdf-compressor/core/native-floors");
-    expect(editorSource).not.toMatch(/from\s*["']@pdf-compressor\/core["']/);
-    const appSource = readFileSync("apps/web/src/App.ts", "utf8");
-    expect(appSource).not.toContain("@pdf-compressor/core");
 
     const fake = createFakeLoader([1]);
     vi.stubGlobal(
@@ -656,5 +654,68 @@ describe("consumed export handle", () => {
       calls.some((call) => call.init.method === "DELETE" && call.url.includes("/api/outputs"))
     ).toBe(false);
     editor.destroy();
+  });
+});
+
+/* ---------------- 6. browser-safe import boundary (whole tree) -------------- */
+
+/**
+ * Every `@pdf-compressor/core` and `pdfjs-dist` specifier anywhere under
+ * `apps/web/src` must be an explicitly browser-safe subpath. Root imports are
+ * flagged even when type-only, and unknown subpaths fail too — the renderer
+ * now lives in core, so a stray root import pulls Node-coupled engines into
+ * the browser bundle.
+ */
+const BROWSER_SAFE_SPECIFIERS = new Set([
+  "@pdf-compressor/core/form-inventory",
+  "@pdf-compressor/core/form-plan",
+  "@pdf-compressor/core/native-floors",
+  "@pdf-compressor/core/ocr-contract",
+  "@pdf-compressor/core/page-manifest",
+  "@pdf-compressor/core/pdfjs-version",
+  "@pdf-compressor/core/schema-error",
+  "pdfjs-dist/build/pdf.min.mjs",
+  "pdfjs-dist/build/pdf.worker.min.mjs?url",
+  "pdfjs-dist/types/src/pdf.js"
+]);
+
+const SPECIFIER_PATTERN =
+  /\bfrom\s*["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']|\bimport\s+["']([^"']+)["']/g;
+
+function webSourceFiles(directory: string): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...webSourceFiles(path));
+    } else if (entry.name.endsWith(".ts") || entry.name.endsWith(".tsx")) {
+      files.push(path);
+    }
+  }
+  return files;
+}
+
+describe("browser-safe import boundary", () => {
+  it("permits only browser-safe subpaths across the whole web source tree", () => {
+    const files = webSourceFiles("apps/web/src");
+    expect(files.length).toBeGreaterThan(0);
+    const offenders: string[] = [];
+    for (const file of files) {
+      const source = readFileSync(file, "utf8");
+      for (const match of source.matchAll(SPECIFIER_PATTERN)) {
+        const specifier = match.slice(1).find((part) => part !== undefined);
+        if (
+          specifier !== undefined &&
+          (specifier === "pdfjs-dist" ||
+            specifier === "@pdf-compressor/core" ||
+            specifier.startsWith("pdfjs-dist/") ||
+            specifier.startsWith("@pdf-compressor/core/")) &&
+          !BROWSER_SAFE_SPECIFIERS.has(specifier)
+        ) {
+          offenders.push(`${file}: "${specifier}"`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 });

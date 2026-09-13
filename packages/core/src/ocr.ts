@@ -15,15 +15,21 @@ import { runOcrMyPdf, type OcrMyPdfResult } from "./engines/ocrmypdf.js";
 import { createTempWorkspace } from "./temp-workspace.js";
 import { withOutputLimit } from "./output-limit.js";
 import { assertFreshDestination, validatePdfInput } from "./validation.js";
+import {
+  SUPPORTED_OCR_LANGUAGES,
+  type OcrLanguage,
+  type OcrMetadata,
+  type OcrOptions
+} from "./ocr-contract.js";
 
-export const SUPPORTED_OCR_LANGUAGES = ["deu", "eng"] as const;
-export type OcrLanguage = (typeof SUPPORTED_OCR_LANGUAGES)[number];
+export {
+  SUPPORTED_OCR_LANGUAGES,
+  type OcrLanguage,
+  type OcrMetadata,
+  type OcrOptions
+} from "./ocr-contract.js";
+
 export const DEFAULT_OCR_TIMEOUT_MS = 300_000;
-
-export interface OcrOptions {
-  languages: readonly OcrLanguage[];
-  autoRotate?: boolean;
-}
 
 export interface OcrPdfOptions extends OcrOptions {
   inputPath: string;
@@ -47,14 +53,6 @@ export interface OcrSummary extends OcrMetadata {
   qpdfVersion: string;
   warnings: string[];
   compatWarnings: PdfInspection["compatWarnings"];
-}
-
-export interface OcrMetadata {
-  engine: "ocrmypdf";
-  version: string;
-  tesseractVersion: string;
-  languages: OcrLanguage[];
-  autoRotate: boolean;
 }
 
 export function normalizeOcrOptions(options: OcrOptions): Required<OcrOptions> {

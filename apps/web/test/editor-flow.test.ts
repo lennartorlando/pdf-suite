@@ -193,8 +193,7 @@ describe("editor lazy boundary", () => {
 
   it("loads PDF.js only through a dynamic editor-only import with a local worker", () => {
     const previewSource = readFileSync("apps/web/src/editor/pdf-preview.ts", "utf8");
-    expect(previewSource).toContain('await import("pdfjs-dist")');
-    expect(previewSource).not.toMatch(/^import\s+(?!type)[^;]*from\s*["']pdfjs-dist["']/m);
+    expect(previewSource).toContain('await import("pdfjs-dist/build/pdf.min.mjs")');
     expect(previewSource).toContain("pdf.worker.min.mjs?url");
     expect(previewSource).not.toContain("mozilla");
     expect(previewSource).not.toContain("cdn");
