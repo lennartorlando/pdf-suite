@@ -287,6 +287,22 @@ describe("form model: loading a plan", () => {
     expect(placement && placement.kind === "text" ? placement.source : "").toBe("/agent/inbox/form.pdf");
   });
 
+  it("keeps a loaded plan's overwrite decision through approval", () => {
+    const plan: FormPlan = {
+      version: 1,
+      source: "/agent/inbox/form.pdf",
+      destination: "/agent/outbox/form-filled.pdf",
+      overwrite: true,
+      burnIn: false,
+      nonce: "agent-nonce-ow",
+      entries: [{ kind: "field", fieldId: "10 0 R", status: "answered", value: "Grace" }]
+    };
+    const derived = derivePlan(loadPlan(base(), plan).state);
+    expect(derived.overwrite).toBe(true);
+    // A plan built without a load never gains an overwrite approval.
+    expect(derivePlan(setFieldText(base(), "10 0 R", "x"), "n").overwrite).toBe(false);
+  });
+
   it("approval turns proposals into answers; rejection reopens them", () => {
     let state = loadPlan(base(), agentPlan).state;
     state = approveField(state, "10 0 R");

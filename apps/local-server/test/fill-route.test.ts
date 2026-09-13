@@ -6,7 +6,7 @@ import { request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as core from "@pdf-compressor/core";
-import { parseFormPlan, serializeFormPlan } from "@pdf-compressor/core/form-plan";
+import { parseFormPlan, serializeFormPlan, type FormPlan } from "@pdf-compressor/core/form-plan";
 import { writeTestPdf } from "../../../packages/core/test/pdf-fixtures.js";
 import { JobManager, LIMITS } from "../src/jobs.js";
 import { createLocalServer } from "../src/server.js";
@@ -710,6 +710,45 @@ describe("fill and inventory routes", () => {
     const download = await call(payload.downloadUrl, { headers: authedHeaders(auth) });
     expect(download.status).toBe(200);
     expect(download.body.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+  });
+
+  it("fills a plan carrying a text placement end to end through the real operation", async () => {
+    const auth = await launch();
+    const plan: FormPlan = {
+      version: 1,
+      source: "upload",
+      destination: "download",
+      overwrite: false,
+      burnIn: false,
+      nonce: "nonce-placement",
+      entries: [
+        {
+          kind: "text",
+          source: "upload",
+          page: 1,
+          rect: { x: 20, y: 600, width: 120, height: 14 },
+          text: "route-placement"
+        }
+      ]
+    };
+    const result = await postFill(auth, fillBody("placementedge", serializeFormPlan(plan), pdf), "placementedge");
+    expect(result.status, result.body.toString("utf8")).toBe(200);
+    const payload = JSON.parse(result.body.toString("utf8")) as {
+      handle: string;
+      downloadUrl: string;
+      placementsWritten: number;
+    };
+    expect(payload.placementsWritten).toBe(1);
+
+    // The delivered file, not the retained path: the placement must be
+    // present in the bytes the person downloads.
+    const download = await call(payload.downloadUrl, { headers: authedHeaders(auth) });
+    expect(download.status).toBe(200);
+    const deliveredPath = join(scratch, "delivered-placement.pdf");
+    await writeFile(deliveredPath, download.body);
+    const verification = await core.verifyFormFill(plan, sourcePath, deliveredPath);
+    expect(verification.placements).toEqual([{ kind: "text", page: 1, applied: true }]);
+    expect(verification.allApplied).toBe(true);
   });
 
   it("aborts on child failure and timeout without a downloadable partial artifact", async () => {

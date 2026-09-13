@@ -282,12 +282,20 @@ async function runFillWork(
     }
 
     // Rebind the opaque plan bindings to this job's private paths (KTD12):
-    // the browser names roles, never paths.
+    // the browser names roles, never paths. Placement entries carry their
+    // own source binding per KTD13, so entries bound to the plan's source
+    // role follow it; anything else stays foreign and the fill refuses it.
     const destinationPath = join(jobDir, "output.pdf");
     const planPath = join(jobDir, "plan.json");
-    await writeFile(planPath, serializeFormPlan({ ...plan, source: upload.sourcePath, destination: destinationPath }), {
-      mode: 0o600
-    });
+    const rebound: FormPlan = {
+      ...plan,
+      source: upload.sourcePath,
+      destination: destinationPath,
+      entries: plan.entries.map((entry) =>
+        entry.kind === "field" || entry.source !== plan.source ? entry : { ...entry, source: upload.sourcePath }
+      )
+    };
+    await writeFile(planPath, serializeFormPlan(rebound), { mode: 0o600 });
 
     const qpdf = await probeVersion(
       () => getQpdfVersion({ signal: controller.signal, timeoutMs: jobs.jobTimeoutMs }),

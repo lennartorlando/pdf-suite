@@ -85,6 +85,8 @@ export interface FormFillState {
   /** The loaded plan's bindings, kept so an approved plan still names the agent's paths (F3). */
   readonly planSource: string | null;
   readonly planDestination: string | null;
+  /** The loaded plan's overwrite decision, kept because it is part of what the person approves. */
+  readonly planOverwrite: boolean | null;
   /** True once any value, placement or review decision exists to lose. */
   readonly dirty: boolean;
 }
@@ -130,6 +132,7 @@ export function createFormState(inventory: FormInventory): FormFillState {
     planNonce: null,
     planSource: null,
     planDestination: null,
+    planOverwrite: null,
     dirty: false
   });
 }
@@ -336,6 +339,7 @@ export function loadPlan(state: FormFillState, plan: FormPlan): LoadPlanResult {
       planNonce: plan.nonce,
       planSource: plan.source,
       planDestination: plan.destination,
+      planOverwrite: plan.overwrite,
       dirty: true
     },
     droppedSignatures,
@@ -410,7 +414,7 @@ export function derivePlan(state: FormFillState, nonce?: string): FormPlan {
     version: FORM_PLAN_VERSION,
     source,
     destination,
-    overwrite: false,
+    overwrite: state.planOverwrite ?? false,
     burnIn: state.burnIn,
     nonce: nonce ?? state.planNonce ?? generateNonce(),
     entries
