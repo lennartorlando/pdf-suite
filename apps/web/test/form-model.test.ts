@@ -262,6 +262,31 @@ describe("form model: loading a plan", () => {
     expect(result.state.planNonce).toBe("n-agent");
   });
 
+  it("keeps a loaded plan's real source and destination bindings through approval (F3)", () => {
+    const plan: FormPlan = {
+      version: 1,
+      source: "/agent/inbox/form.pdf",
+      destination: "/agent/outbox/form-filled.pdf",
+      overwrite: false,
+      burnIn: false,
+      nonce: "agent-nonce-9",
+      entries: [
+        { kind: "field", fieldId: "10 0 R", status: "proposed", value: "Grace" },
+        { kind: "text", source: "/agent/inbox/form.pdf", page: 1, rect: { x: 10, y: 20, width: 100, height: 14 }, text: "note" }
+      ]
+    };
+    let state = loadPlan(base(), plan).state;
+    state = approveField(state, "10 0 R");
+    const derived = derivePlan(state);
+    expect(derived.source).toBe("/agent/inbox/form.pdf");
+    expect(derived.destination).toBe("/agent/outbox/form-filled.pdf");
+    expect(derived.nonce).toBe("agent-nonce-9");
+    // Apply refuses a placement whose source differs from the plan's
+    // (FILL_PLAN_SOURCE_MISMATCH), so it must carry the same binding.
+    const placement = derived.entries.find((entry) => entry.kind === "text");
+    expect(placement && placement.kind === "text" ? placement.source : "").toBe("/agent/inbox/form.pdf");
+  });
+
   it("approval turns proposals into answers; rejection reopens them", () => {
     let state = loadPlan(base(), agentPlan).state;
     state = approveField(state, "10 0 R");

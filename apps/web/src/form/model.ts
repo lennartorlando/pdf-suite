@@ -82,6 +82,9 @@ export interface FormFillState {
   readonly burnIn: boolean;
   /** The loaded agent plan's nonce, kept so approval binds the same plan. */
   readonly planNonce: string | null;
+  /** The loaded plan's bindings, kept so an approved plan still names the agent's paths (F3). */
+  readonly planSource: string | null;
+  readonly planDestination: string | null;
   /** True once any value, placement or review decision exists to lose. */
   readonly dirty: boolean;
 }
@@ -125,6 +128,8 @@ export function createFormState(inventory: FormInventory): FormFillState {
     placements: Object.freeze([]),
     burnIn: false,
     planNonce: null,
+    planSource: null,
+    planDestination: null,
     dirty: false
   });
 }
@@ -329,6 +334,8 @@ export function loadPlan(state: FormFillState, plan: FormPlan): LoadPlanResult {
       placements: [...state.placements, ...placements],
       burnIn: plan.burnIn,
       planNonce: plan.nonce,
+      planSource: plan.source,
+      planDestination: plan.destination,
       dirty: true
     },
     droppedSignatures,
@@ -358,6 +365,12 @@ function textRect(placement: Placement): PdfRect {
  * never written. Placement strokes translate into page space here.
  */
 export function derivePlan(state: FormFillState, nonce?: string): FormPlan {
+  // A loaded plan keeps the agent's real bindings so the approved bytes are
+  // the ones apply resolves (F3); without one, the browser names the roles
+  // the fill route rebinds to job paths (F1, KTD12). Placement sources must
+  // match plan.source or validation refuses them (FILL_PLAN_SOURCE_MISMATCH).
+  const source = state.planSource ?? PLAN_SOURCE_BINDING;
+  const destination = state.planDestination ?? PLAN_DESTINATION_BINDING;
   const entries: FormPlanEntry[] = [];
   for (const field of state.inventory.fields) {
     if (!FILLABLE_TYPES.has(field.type)) continue;
@@ -376,17 +389,17 @@ export function derivePlan(state: FormFillState, nonce?: string): FormPlan {
       );
       entries.push({
         kind: "signature",
-        source: PLAN_SOURCE_BINDING,
+        source,
         page: placement.page,
         rect: placement.rect,
         strokes
       });
     } else if (placement.kind === "checkmark") {
-      entries.push({ kind: "checkmark", source: PLAN_SOURCE_BINDING, page: placement.page, rect: placement.rect });
+      entries.push({ kind: "checkmark", source, page: placement.page, rect: placement.rect });
     } else {
       entries.push({
         kind: "text",
-        source: PLAN_SOURCE_BINDING,
+        source,
         page: placement.page,
         rect: textRect(placement),
         text: placement.text
@@ -395,8 +408,8 @@ export function derivePlan(state: FormFillState, nonce?: string): FormPlan {
   }
   return {
     version: FORM_PLAN_VERSION,
-    source: PLAN_SOURCE_BINDING,
-    destination: PLAN_DESTINATION_BINDING,
+    source,
+    destination,
     overwrite: false,
     burnIn: state.burnIn,
     nonce: nonce ?? state.planNonce ?? generateNonce(),
