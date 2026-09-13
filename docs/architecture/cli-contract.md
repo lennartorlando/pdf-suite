@@ -26,6 +26,14 @@ Inspects one or more local PDFs read-only through the shared core.
 - Success JSON contains `status`, the shared `qpdfVersion`, and one entry per
   source with `id`, `path`, `pageCount`, `pdfVersion`, `qpdfVersion`,
   `encrypted`, `signed`, `activeContent`, `compatWarnings`, and `warnings`.
+- `activeContent` entries are `<kind>@<scope>` strings reported by the shared
+  reachability classifier: `kind` is the action subtype verbatim (`/URI`,
+  `/JavaScript`, `/SubmitForm`, `/ResetForm`, ...), a structural class
+  (`rich-media`, `embedded-files`), or `action` for an action reference that
+  could not be classified; `scope` is `catalog` or `field`. `/GoTo` is the
+  only action subtype never reported. An inspection that cannot enumerate the
+  object graph fails with `INSPECTION_INCOMPLETE` rather than reporting an
+  empty list.
 
 ### `assemble`
 

@@ -30,6 +30,22 @@ export interface FixtureFeatures {
   importData?: boolean;
   richMedia?: boolean;
   embeddedFiles?: boolean;
+  /** /Link annotation with a /A URI action in the page's annotation array. */
+  remoteLinkAction?: boolean;
+  /** /OpenAction GoTo action chaining via /Next to a /Launch action. */
+  chainedLaunchAction?: boolean;
+  /** One URI action object referenced by both the catalog /OpenAction and the widget's /A (needs formTextField). */
+  sharedCatalogAction?: boolean;
+  /** Field hierarchy whose non-terminal parent carries an /AA script action. */
+  nonTerminalFieldAction?: boolean;
+  /** Widget annotation carrying an /AA format script action (needs formTextField). */
+  widgetFieldAction?: boolean;
+  /** Widget /AA action chaining via /Next to a /Launch action (needs formTextField). */
+  widgetChainedLaunch?: boolean;
+  /** The AcroForm dictionary itself carries an /AA script action (needs formTextField). */
+  formDictAction?: boolean;
+  /** /OpenAction GoTo and /Launch actions pointing at each other through /Next. */
+  cyclicActions?: boolean;
 }
 
 function escapePdfText(value: string): string {
@@ -79,6 +95,25 @@ export function buildTestPdf(pages: FixturePage[], features: FixtureFeatures = {
     list.push(`/AA << /O ${aaAction} 0 R >>`);
     pageExtras.set(0, list);
   }
+  if (features.remoteLinkAction) {
+    const uri = extra("<< /S /URI /URI (https://example.invalid/remote) >>");
+    const link = extra(`<< /Type /Annot /Subtype /Link /Rect [10 10 60 30] /A ${uri} 0 R >>`);
+    const list = pageExtras.get(0) ?? [];
+    list.push(`/Annots [${link} 0 R]`);
+    pageExtras.set(0, list);
+  }
+  if (features.chainedLaunchAction) {
+    const launch = extra("<< /S /Launch /Win << /P (fixture) >> >>");
+    const first = extra(`<< /S /GoTo /D [${pageIds[0]} 0 R /Fit] /Next ${launch} 0 R >>`);
+    catalogExtras.push(`/OpenAction ${first} 0 R`);
+  }
+  if (features.cyclicActions) {
+    const firstId = nextId++;
+    const secondId = nextId++;
+    bodies.set(firstId, `<< /S /GoTo /D [${pageIds[0]} 0 R /Fit] /Next ${secondId} 0 R >>`);
+    bodies.set(secondId, `<< /S /Launch /Win << /P (fixture) >> /Next ${firstId} 0 R >>`);
+    catalogExtras.push(`/OpenAction ${firstId} 0 R`);
+  }
   if (features.richMedia) {
     const richContent = extra("<< /Type /RichMediaContent >>");
     const annot = extra(
@@ -115,6 +150,26 @@ export function buildTestPdf(pages: FixturePage[], features: FixtureFeatures = {
     const widget = nextId++;
     const field = nextId++;
     const form = nextId++;
+    const widgetExtras: string[] = [];
+    const formExtras: string[] = [];
+    if (features.widgetFieldAction) {
+      const format = extra("<< /S /JavaScript /JS (fixture-format) >>");
+      widgetExtras.push(`/AA << /F ${format} 0 R >>`);
+    }
+    if (features.widgetChainedLaunch) {
+      const launch = extra("<< /S /Launch /Win << /P (fixture) >> >>");
+      const first = extra(`<< /S /GoTo /D [${pageIds[0]} 0 R /Fit] /Next ${launch} 0 R >>`);
+      widgetExtras.push(`/AA << /O ${first} 0 R >>`);
+    }
+    if (features.formDictAction) {
+      const action = extra("<< /S /JavaScript /JS (fixture-form-dict) >>");
+      formExtras.push(`/AA << /O ${action} 0 R >>`);
+    }
+    if (features.sharedCatalogAction) {
+      const shared = extra("<< /S /URI /URI (https://example.invalid/shared) >>");
+      catalogExtras.push(`/OpenAction ${shared} 0 R`);
+      widgetExtras.push(`/A ${shared} 0 R`);
+    }
     if (features.signatureField) {
       const sigValue = extra("<< /Type /Sig /Filter /Adobe.PPKLite /ByteRange [0 100 200 300] >>");
       bodies.set(
@@ -126,9 +181,30 @@ export function buildTestPdf(pages: FixturePage[], features: FixtureFeatures = {
     }
     bodies.set(
       widget,
-      `<< /Type /Annot /Subtype /Widget /Rect [100 100 200 120] /P ${pageIds[0]} 0 R /Parent ${field} 0 R >>`
+      `<< /Type /Annot /Subtype /Widget /Rect [100 100 200 120] /P ${pageIds[0]} 0 R /Parent ${field} 0 R${widgetExtras.length ? ` ${widgetExtras.join(" ")}` : ""} >>`
     );
-    bodies.set(form, `<< /Fields [${field} 0 R] >>`);
+    bodies.set(form, `<< /Fields [${field} 0 R]${formExtras.length ? ` ${formExtras.join(" ")}` : ""} >>`);
+    catalogExtras.push(`/AcroForm ${form} 0 R`);
+    const list = pageExtras.get(0) ?? [];
+    list.push(`/Annots [${widget} 0 R]`);
+    pageExtras.set(0, list);
+  }
+  if (features.nonTerminalFieldAction) {
+    const widget = nextId++;
+    const terminal = nextId++;
+    const parent = nextId++;
+    const form = nextId++;
+    const format = extra("<< /S /JavaScript /JS (fixture-format) >>");
+    bodies.set(parent, `<< /Kids [${terminal} 0 R] /AA << /F ${format} 0 R >> >>`);
+    bodies.set(
+      terminal,
+      `<< /Parent ${parent} 0 R /FT /Tx /T (fixture-child) /V () /Kids [${widget} 0 R] >>`
+    );
+    bodies.set(
+      widget,
+      `<< /Type /Annot /Subtype /Widget /Rect [100 100 200 120] /P ${pageIds[0]} 0 R /Parent ${terminal} 0 R >>`
+    );
+    bodies.set(form, `<< /Fields [${parent} 0 R] >>`);
     catalogExtras.push(`/AcroForm ${form} 0 R`);
     const list = pageExtras.get(0) ?? [];
     list.push(`/Annots [${widget} 0 R]`);

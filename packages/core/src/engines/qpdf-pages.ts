@@ -23,14 +23,20 @@ export const NATIVE_PARSER_RISK_NOTE =
   "upstream parser/resource-exhaustion fixes are pending a later release, so versions below the " +
   "security floor fail closed.";
 
-export type ActiveContentKind =
-  | "javascript"
-  | "open-action"
-  | "additional-actions"
-  | "launch"
-  | "submit-import"
-  | "rich-media"
-  | "embedded-files";
+/** Where a detected action sits: the document catalog reaches it, or only the field tree does. */
+export type ActiveContentScope = "catalog" | "field";
+
+/**
+ * One active-content finding as "<kind>@<scope>": the action subtype
+ * verbatim ("/URI", "/SubmitForm"), a structural class ("rich-media",
+ * "embedded-files"), or "action" for an action reference that could not be
+ * classified. Kept string-shaped so inspection consumers compare and join
+ * findings without re-deriving policy.
+ */
+export type ActiveContentFinding = `${string}@${ActiveContentScope}`;
+
+/** Operations the admission policy answers for. */
+export type AdmissionOperation = "compress" | "assemble" | "ocr" | "fill";
 
 export type CompatWarningKind = "forms" | "bookmarks" | "tags" | "page-labels";
 
@@ -41,7 +47,7 @@ export interface PdfInspection {
   qpdfVersion: string;
   encrypted: boolean;
   signed: boolean;
-  activeContent: ActiveContentKind[];
+  activeContent: ActiveContentFinding[];
   compatWarnings: CompatWarningKind[];
   /** qpdf stderr warnings (exit code 3 still yields a usable inspection). */
   warnings: string[];
@@ -126,63 +132,423 @@ interface QpdfJson {
   attachments?: Record<string, unknown>;
   encrypt?: { encrypted?: boolean };
   pagelabels?: unknown[];
-  qpdf?: [{ pdfversion?: string }, Record<string, unknown>];
+  qpdf?: [{ pdfversion?: string; jsonversion?: number }, Record<string, unknown>];
 }
 
-function scanObjects(objectsText: string, pattern: RegExp): boolean {
-  return pattern.test(objectsText);
+/** qpdf --json object-map version this traversal was written against. */
+const QPDF_JSON_VERSION = 2;
+const OBJECT_REF = /^\d+ \d+ R$/;
+/** Initial Safety Limits: bound on traversed object-graph nodes per inspection. */
+export const CLASSIFIER_NODE_BUDGET = 200_000;
+
+/**
+ * Action subtypes named by PDF 32000 §12.6. Anything else in action position
+ * is unclassifiable and fails closed. Of these, only /GoTo is permitted:
+ * internal navigation carries no reachable capability.
+ */
+const KNOWN_ACTION_SUBTYPES = new Set([
+  "/GoTo",
+  "/GoToR",
+  "/GoToE",
+  "/GoToDp",
+  "/Launch",
+  "/Thread",
+  "/URI",
+  "/Sound",
+  "/Movie",
+  "/Hide",
+  "/Named",
+  "/SetOCGState",
+  "/Rendition",
+  "/Trans",
+  "/GoTo3DView",
+  "/JavaScript",
+  "/SubmitForm",
+  "/ResetForm",
+  "/ImportData"
+]);
+const PERMITTED_ACTION_SUBTYPES = new Set(["/GoTo"]);
+/** Keys whose value is an action dictionary or a reference to one. */
+const ACTION_EDGE_KEYS = new Set(["/A", "/OpenAction", "/OnActivation"]);
+/**
+ * Actions filling may admit when field-bound, because R15 requires them to
+ * be removed before the filled file is delivered.
+ */
+const FILL_PERMITTED_FIELD_ACTIONS = new Set(["/JavaScript", "/SubmitForm", "/ResetForm"]);
+
+/**
+ * The one admission policy shared by every operation (KTD4): signed input is
+ * never admissible; compression, assembly and OCR admit no active content;
+ * filling alone admits the field-bound actions it strips before delivery.
+ */
+export function isAdmissibleFor(
+  result: { signed: boolean; activeContent: readonly ActiveContentFinding[] },
+  operation: AdmissionOperation
+): boolean {
+  if (result.signed) return false;
+  if (operation === "fill") {
+    return result.activeContent.every((finding) => {
+      const scopeIndex = finding.lastIndexOf("@");
+      return (
+        finding.endsWith("@field") &&
+        FILL_PERMITTED_FIELD_ACTIONS.has(finding.slice(0, scopeIndex))
+      );
+    });
+  }
+  return result.activeContent.length === 0;
+}
+
+function isDict(node: unknown): node is Record<string, unknown> {
+  return typeof node === "object" && node !== null && !Array.isArray(node);
+}
+
+function incomplete(detail: string): CompressionError {
+  return new CompressionError(
+    "INSPECTION_INCOMPLETE",
+    `qpdf inspection could not enumerate the document's object graph (${detail}); treating inspection as incomplete.`,
+    { detail }
+  );
+}
+
+/** The value a qpdf object-map entry contributes to traversal. */
+function objectNode(entry: unknown): unknown {
+  if (!isDict(entry)) return undefined;
+  if ("value" in entry) return entry["value"];
+  const stream = entry["stream"];
+  return isDict(stream) ? stream["dict"] : undefined;
+}
+
+type WalkName = "catalog" | "field" | "orphan";
+
+interface WalkContext {
+  walk: WalkName;
+  /** True when this node was reached through an action edge. */
+  action: boolean;
+  /** True when this node is an additional-actions map whose values are actions. */
+  aaMap: boolean;
+}
+
+const PLAIN: Omit<WalkContext, "walk"> = { action: false, aaMap: false };
+
+interface ClassificationWalk {
+  objects: Record<string, unknown>;
+  visited: Record<WalkName, Set<string>>;
+  nodes: number;
+  findings: Map<string, ActiveContentFinding>;
+}
+
+function tick(walk: ClassificationWalk): void {
+  walk.nodes += 1;
+  if (walk.nodes > CLASSIFIER_NODE_BUDGET) {
+    throw incomplete(`traversal exceeded the ${CLASSIFIER_NODE_BUDGET} node budget`);
+  }
+}
+
+function recordFinding(
+  walk: ClassificationWalk,
+  name: WalkName,
+  objKey: string,
+  kind: string
+): void {
+  // Field walk findings on objects the catalog walk also reached are
+  // catalog-scoped: scope is decided by reachability, not discovery order.
+  const scope: ActiveContentScope =
+    name === "field" && !walk.visited.catalog.has(objKey) ? "field" : "catalog";
+  walk.findings.set(`${objKey}|${kind}`, `${kind}@${scope}`);
+}
+
+function visitObject(ref: string, walk: ClassificationWalk, ctx: WalkContext): void {
+  const key = `obj:${ref}`;
+  if (walk.visited[ctx.walk].has(key)) return;
+  if (ctx.walk === "orphan" && (walk.visited.catalog.has(key) || walk.visited.field.has(key))) {
+    return;
+  }
+  walk.visited[ctx.walk].add(key);
+  tick(walk);
+  const node = objectNode(walk.objects[key]);
+  if (node === undefined) {
+    throw incomplete(`object ${ref} is missing from the object map or unclassifiable`);
+  }
+  traverseNode(node, walk, ctx, key);
+}
+
+function traverseNode(
+  node: unknown,
+  walk: ClassificationWalk,
+  ctx: WalkContext,
+  objKey: string
+): void {
+  tick(walk);
+  if (typeof node === "string") {
+    if (OBJECT_REF.test(node)) visitObject(node, walk, ctx);
+    return;
+  }
+  if (Array.isArray(node)) {
+    // An array reached through an action edge is a destination, not a chain;
+    // chain edges are only the /Next entry of a dict that is an action.
+    for (const element of node) traverseNode(element, walk, { walk: ctx.walk, ...PLAIN }, objKey);
+    return;
+  }
+  if (isDict(node)) traverseDict(node, walk, ctx, objKey);
+  else if (ctx.action || ctx.aaMap) recordFinding(walk, ctx.walk, objKey, "action");
+}
+
+function traverseActionTarget(
+  value: unknown,
+  walk: ClassificationWalk,
+  name: WalkName,
+  objKey: string,
+  arrayIsActionList: boolean
+): void {
+  tick(walk);
+  if (typeof value === "string") {
+    if (OBJECT_REF.test(value)) {
+      visitObject(value, walk, { walk: name, action: true, aaMap: false });
+    } else {
+      recordFinding(walk, name, objKey, "action");
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const element of value) {
+      if (arrayIsActionList) {
+        traverseActionTarget(element, walk, name, objKey, false);
+      } else {
+        traverseNode(element, walk, { walk: name, ...PLAIN }, objKey);
+      }
+    }
+    return;
+  }
+  if (isDict(value)) {
+    traverseDict(value, walk, { walk: name, action: true, aaMap: false }, objKey);
+    return;
+  }
+  recordFinding(walk, name, objKey, "action");
+}
+
+function traverseAnnotations(value: unknown, walk: ClassificationWalk, objKey: string): void {
+  const visitElement = (element: unknown): void => {
+    tick(walk);
+    if (isDict(element)) {
+      // Widget annotations belong to the field walk, not the catalog walk.
+      if (element["/Subtype"] !== "/Widget") {
+        traverseDict(element, walk, { walk: "catalog", ...PLAIN }, objKey);
+      }
+      return;
+    }
+    if (typeof element === "string" && OBJECT_REF.test(element)) {
+      const target = objectNode(walk.objects[`obj:${element}`]);
+      if (isDict(target) && target["/Subtype"] === "/Widget") return;
+      visitObject(element, walk, { walk: "catalog", ...PLAIN });
+      return;
+    }
+    traverseNode(element, walk, { walk: "catalog", ...PLAIN }, objKey);
+  };
+  if (typeof value === "string" && OBJECT_REF.test(value)) {
+    const key = `obj:${value}`;
+    if (walk.visited.catalog.has(key)) return;
+    walk.visited.catalog.add(key);
+    tick(walk);
+    const target = objectNode(walk.objects[key]);
+    if (target === undefined) {
+      throw incomplete(`annotation array ${value} is missing from the object map or unclassifiable`);
+    }
+    if (Array.isArray(target)) {
+      for (const element of target) visitElement(element);
+      return;
+    }
+    visitElement(target);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const element of value) visitElement(element);
+    return;
+  }
+  visitElement(value);
+}
+
+function traverseAdditionalActions(
+  value: unknown,
+  walk: ClassificationWalk,
+  name: WalkName,
+  objKey: string
+): void {
+  tick(walk);
+  if (isDict(value)) {
+    for (const entry of Object.values(value)) {
+      traverseActionTarget(entry, walk, name, objKey, false);
+    }
+    return;
+  }
+  if (typeof value === "string" && OBJECT_REF.test(value)) {
+    visitObject(value, walk, { walk: name, action: false, aaMap: true });
+    return;
+  }
+  traverseNode(value, walk, { walk: name, ...PLAIN }, objKey);
+}
+
+function traverseDict(
+  dict: Record<string, unknown>,
+  walk: ClassificationWalk,
+  ctx: WalkContext,
+  objKey: string
+): void {
+  if (ctx.aaMap) {
+    for (const value of Object.values(dict)) {
+      traverseActionTarget(value, walk, ctx.walk, objKey, false);
+    }
+    return;
+  }
+  const subtype = dict["/S"];
+  const isName = typeof subtype === "string" && subtype.startsWith("/");
+  const isAction = ctx.action || (isName && KNOWN_ACTION_SUBTYPES.has(subtype));
+  if (isAction && (!isName || !PERMITTED_ACTION_SUBTYPES.has(subtype))) {
+    recordFinding(walk, ctx.walk, objKey, isName ? subtype : "action");
+  }
+  if (dict["/Subtype"] === "/RichMedia" || dict["/Type"] === "/RichMedia") {
+    recordFinding(walk, ctx.walk, objKey, "rich-media");
+  }
+  if (dict["/Type"] === "/Filespec" || "/EF" in dict || "/EmbeddedFiles" in dict) {
+    recordFinding(walk, ctx.walk, objKey, "embedded-files");
+  }
+  for (const [key, value] of Object.entries(dict)) {
+    // Ownership edges (KTD4): the form dictionary's field edge and a page's
+    // widget annotations belong to the field walk; a widget's /P edge back
+    // to its page stays out of the field walk.
+    if (ctx.walk === "catalog" && key === "/Fields") continue;
+    if (ctx.walk === "field" && key === "/P") continue;
+    if (key === "/Annots" && ctx.walk === "catalog") {
+      traverseAnnotations(value, walk, objKey);
+      continue;
+    }
+    if (key === "/AA") {
+      traverseAdditionalActions(value, walk, ctx.walk, objKey);
+      continue;
+    }
+    if (ACTION_EDGE_KEYS.has(key)) {
+      traverseActionTarget(value, walk, ctx.walk, objKey, false);
+      continue;
+    }
+    if (key === "/Next") {
+      // /Next is an action chain only on an action dictionary; everywhere
+      // else (outline items, page dictionaries) it is an ordinary edge.
+      if (isAction) traverseActionTarget(value, walk, ctx.walk, objKey, true);
+      else traverseNode(value, walk, { walk: ctx.walk, ...PLAIN }, objKey);
+      continue;
+    }
+    traverseNode(value, walk, { walk: ctx.walk, ...PLAIN }, objKey);
+  }
+}
+
+function fieldRoots(raw: QpdfJson, objects: Record<string, unknown>): string[] {
+  const acroform = raw.acroform;
+  if (!acroform) return [];
+  const fields = acroform.fields;
+  if (fields === undefined || fields === null) {
+    if (acroform.hasacroform === true) {
+      throw incomplete("acroform section reports a form but no field entries");
+    }
+    return [];
+  }
+  if (!Array.isArray(fields)) {
+    throw incomplete("acroform field section is malformed");
+  }
+  const roots: string[] = [];
+  for (const entry of fields) {
+    if (!isDict(entry)) throw incomplete("acroform field entry is malformed");
+    const annotation = entry["annotation"];
+    const candidates = [
+      entry["object"],
+      isDict(annotation) ? annotation["object"] : undefined,
+      entry["parent"]
+    ];
+    const refs = candidates.filter(
+      (candidate): candidate is string =>
+        typeof candidate === "string" && OBJECT_REF.test(candidate)
+    );
+    if (refs.length === 0) {
+      throw incomplete("acroform field entry lacks annotation references");
+    }
+    for (const ref of refs) {
+      if (!isDict(objects[`obj:${ref}`])) {
+        throw incomplete(`acroform field reference ${ref} is missing from the object map`);
+      }
+      roots.push(ref);
+    }
+  }
+  return roots;
 }
 
 /**
- * Map raw qpdf object text to blocked active-content classes (fail closed)
- * and inert compatibility warnings (surface without claiming preservation).
+ * Classify one parsed qpdf --json document (fail closed). Active content is
+ * found by an allowlist over two ownership-aware reachability walks (KTD4):
+ * the catalog walk starts at the trailer root but skips the AcroForm field
+ * edge and page widget annotations; the field walk starts at the annotation
+ * references in the acroform field section and climbs /Parent so non-terminal
+ * parents are covered. An object is field-bound only when the field walk
+ * reaches it and the catalog walk does not. Any walk that cannot enumerate
+ * its reachable set throws INSPECTION_INCOMPLETE rather than admit.
  */
 export function classifyQpdfJson(raw: QpdfJson): {
   signed: boolean;
-  activeContent: ActiveContentKind[];
+  activeContent: ActiveContentFinding[];
   compatWarnings: CompatWarningKind[];
 } {
-  const objectsText = JSON.stringify(raw.qpdf?.[1] ?? {});
-  const activeContent: ActiveContentKind[] = [];
-  if (scanObjects(objectsText, /\/JavaScript\b/) || scanObjects(objectsText, /\/JS\b/)) {
-    activeContent.push("javascript");
+  const objects = raw.qpdf?.[1];
+  if (raw.qpdf?.[0]?.jsonversion !== QPDF_JSON_VERSION || !isDict(objects)) {
+    throw incomplete("unsupported or missing qpdf JSON object map");
   }
-  if (scanObjects(objectsText, /\/OpenAction\b/)) activeContent.push("open-action");
-  if (scanObjects(objectsText, /\/AA\b/)) activeContent.push("additional-actions");
-  if (scanObjects(objectsText, /\/Launch\b/)) activeContent.push("launch");
-  if (scanObjects(objectsText, /\/SubmitForm\b/) || scanObjects(objectsText, /\/ImportData\b/)) {
-    activeContent.push("submit-import");
-  }
-  if (scanObjects(objectsText, /\/RichMedia\b/)) activeContent.push("rich-media");
+  const trailer = objectNode(objects["trailer"]);
+  const rootRef = isDict(trailer) ? trailer["/Root"] : undefined;
   if (
-    scanObjects(objectsText, /\/EmbeddedFiles\b/) ||
-    scanObjects(objectsText, /\/Filespec\b/) ||
-    Object.keys(raw.attachments ?? {}).length > 0
+    typeof rootRef !== "string" ||
+    !OBJECT_REF.test(rootRef) ||
+    !isDict(objects[`obj:${rootRef}`])
   ) {
-    activeContent.push("embedded-files");
+    throw incomplete("trailer lacks a resolvable document catalog");
+  }
+
+  const walk: ClassificationWalk = {
+    objects,
+    visited: { catalog: new Set(), field: new Set(), orphan: new Set() },
+    nodes: 0,
+    findings: new Map()
+  };
+  visitObject(rootRef, walk, { walk: "catalog", ...PLAIN });
+  for (const ref of fieldRoots(raw, objects)) {
+    visitObject(ref, walk, { walk: "field", ...PLAIN });
+  }
+  // Objects unreachable from either root set are still part of the file;
+  // classify them conservatively as catalog-scoped.
+  for (const key of Object.keys(objects)) {
+    if (!key.startsWith("obj:")) continue;
+    if (walk.visited.catalog.has(key) || walk.visited.field.has(key)) continue;
+    if (walk.visited.orphan.has(key)) continue;
+    visitObject(key.slice(4), walk, { walk: "orphan", ...PLAIN });
+  }
+  if (Object.keys(raw.attachments ?? {}).length > 0) {
+    walk.findings.set("attachments|embedded-files", "embedded-files@catalog");
   }
 
   // A document signature (/Sig field, /DocMDP permissions, /ByteRange) must
   // block page export: assembly would invalidate it silently.
+  const objectsText = JSON.stringify(objects);
   const signed =
-    scanObjects(objectsText, /\/Sig\b/) ||
-    scanObjects(objectsText, /\/DocMDP\b/) ||
-    scanObjects(objectsText, /\/ByteRange\b/);
+    /\/Sig\b/.test(objectsText) ||
+    /\/DocMDP\b/.test(objectsText) ||
+    /\/ByteRange\b/.test(objectsText);
 
   const compatWarnings: CompatWarningKind[] = [];
   if (raw.acroform?.hasacroform === true || (raw.acroform?.fields?.length ?? 0) > 0) {
     compatWarnings.push("forms");
   }
   if ((raw.outlines?.length ?? 0) > 0) compatWarnings.push("bookmarks");
-  if (
-    scanObjects(objectsText, /\/StructTreeRoot\b/) ||
-    scanObjects(objectsText, /\/MarkInfo\b/)
-  ) {
+  if (/\/StructTreeRoot\b/.test(objectsText) || /\/MarkInfo\b/.test(objectsText)) {
     compatWarnings.push("tags");
   }
   if ((raw.pagelabels?.length ?? 0) > 0) compatWarnings.push("page-labels");
 
-  return { signed, activeContent, compatWarnings };
+  return { signed, activeContent: [...walk.findings.values()], compatWarnings };
 }
 
 function isPasswordError(stderr: string): boolean {

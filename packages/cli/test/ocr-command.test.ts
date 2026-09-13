@@ -17,7 +17,15 @@ function inspectionJson(): string {
     attachments: {},
     encrypt: { encrypted: false },
     pagelabels: [],
-    qpdf: [{ pdfversion: "1.7", jsonversion: 2 }, {}]
+    qpdf: [
+      { pdfversion: "1.7", jsonversion: 2 },
+      {
+        trailer: { value: { "/Root": "1 0 R" } },
+        "obj:1 0 R": { value: { "/Type": "/Catalog", "/Pages": "2 0 R" } },
+        "obj:2 0 R": { value: { "/Type": "/Pages", "/Kids": ["3 0 R"], "/Count": 1 } },
+        "obj:3 0 R": { value: { "/Type": "/Page", "/Parent": "2 0 R", "/MediaBox": [0, 0, 612, 792] } }
+      }
+    ]
   });
 }
 

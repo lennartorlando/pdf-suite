@@ -33,7 +33,16 @@ function inspectionJson(pageCount: number, objects: Record<string, unknown> = {}
     attachments: {},
     encrypt: { encrypted: false },
     pagelabels: [],
-    qpdf: [{ pdfversion: "1.7", jsonversion: 2 }, objects]
+    qpdf: [
+      { pdfversion: "1.7", jsonversion: 2 },
+      {
+        trailer: { value: { "/Root": "1 0 R" } },
+        "obj:1 0 R": { value: { "/Type": "/Catalog", "/Pages": "2 0 R" } },
+        "obj:2 0 R": { value: { "/Type": "/Pages", "/Kids": ["3 0 R"], "/Count": pageCount } },
+        "obj:3 0 R": { value: { "/Type": "/Page", "/Parent": "2 0 R", "/MediaBox": [0, 0, 612, 792] } },
+        ...objects
+      }
+    ]
   });
 }
 
@@ -484,7 +493,9 @@ describe("runAssembleCommand", () => {
       [setup.aPath, 3],
       [setup.bPath, 2]
     ]);
-    const signedObjects = { "obj:9 0 R": "<< /Type /Sig /Filter /Adobe.PPKLite /ByteRange [0 100 200 300] >>" };
+    const signedObjects = {
+      "obj:9 0 R": { value: { "/Type": "/Sig", "/Filter": "/Adobe.PPKLite", "/ByteRange": [0, 100, 200, 300] } }
+    };
     try {
       const result = await runAssembleCommand(assembleArgs(setup, "blocked.pdf"), {
         run: makeFakeRunner(freshState({ objects: signedObjects }), pagesByPath)
@@ -503,7 +514,9 @@ describe("runAssembleCommand", () => {
       [setup.aPath, 3],
       [setup.bPath, 2]
     ]);
-    const activeObjects = { "obj:9 0 R": "<< /S /JavaScript /JS (app.alert('x')) >>" };
+    const activeObjects = {
+      "obj:9 0 R": { value: { "/S": "/JavaScript", "/JS": "u:app.alert('x')" } }
+    };
     try {
       const result = await runAssembleCommand(assembleArgs(setup, "blocked.pdf"), {
         run: makeFakeRunner(freshState({ objects: activeObjects }), pagesByPath)
