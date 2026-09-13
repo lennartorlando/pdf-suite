@@ -304,3 +304,104 @@ describe("active-content admission", () => {
     expect(result.compatWarnings).toContain("forms");
   });
 });
+
+describe("signature and XFA classification", () => {
+  const SIG_DICT = {
+    "/Type": "/Sig",
+    "/Filter": "/Adobe.PPKLite",
+    "/ByteRange": [0, 100, 200, 300],
+    "/Contents": "h:00"
+  };
+
+  function formDocument(
+    form: Record<string, unknown>,
+    catalogExtra: Record<string, unknown> = {},
+    extraObjects: Record<string, unknown> = {},
+    acroform: Record<string, unknown> = { hasacroform: true, fields: [] }
+  ) {
+    return jsonDocument(
+      objectMap({
+        "obj:1 0 R": {
+          value: { "/Type": "/Catalog", "/Pages": "2 0 R", "/AcroForm": "4 0 R", ...catalogExtra }
+        },
+        "obj:4 0 R": { value: form },
+        ...extraObjects
+      }),
+      { acroform }
+    );
+  }
+
+  it("does not treat an empty signature widget as signed (R16)", () => {
+    const result = classifyQpdfJson(
+      formDocument({ "/Fields": ["5 0 R"] }, {}, {
+        "obj:5 0 R": { value: { "/FT": "/Sig", "/T": "u:sig", "/Kids": ["6 0 R"] } },
+        "obj:6 0 R": { value: { "/Type": "/Annot", "/Subtype": "/Widget", "/Parent": "5 0 R" } }
+      })
+    );
+    expect(result.signed).toBe(false);
+    expect(isAdmissibleFor({ encrypted: false, ...result }, "fill")).toBe(true);
+  });
+
+  it("blocks a signature field holding a value", () => {
+    const result = classifyQpdfJson(
+      formDocument({ "/Fields": ["5 0 R"] }, {}, {
+        "obj:5 0 R": { value: { "/FT": "/Sig", "/T": "u:sig", "/V": "7 0 R" } },
+        "obj:7 0 R": { value: SIG_DICT }
+      })
+    );
+    expect(result.signed).toBe(true);
+  });
+
+  it("does not block on a usage-rights signature but reports it", () => {
+    const result = classifyQpdfJson(
+      formDocument({}, { "/Perms": { "/UR3": "8 0 R" } }, {
+        "obj:8 0 R": {
+          value: { ...SIG_DICT, "/Reference": [{ "/TransformMethod": "/UR3" }] }
+        }
+      })
+    );
+    expect(result.signed).toBe(false);
+    expect(result.usageRights).toBe(true);
+    expect(isAdmissibleFor({ encrypted: false, ...result }, "fill")).toBe(true);
+  });
+
+  it("blocks a document-modification permission signature", () => {
+    const result = classifyQpdfJson(
+      formDocument({}, { "/Perms": { "/DocMDP": "8 0 R" } }, {
+        "obj:8 0 R": {
+          value: { ...SIG_DICT, "/Reference": [{ "/TransformMethod": "/DocMDP" }] }
+        }
+      })
+    );
+    expect(result.signed).toBe(true);
+    expect(result.usageRights).toBe(false);
+  });
+
+  it("detects XFA on the form dictionary and needs-rendering on the form section", () => {
+    const xfa = classifyQpdfJson(
+      formDocument({ "/XFA": ["u:preamble", "7 0 R"] }, {}, {
+        "obj:7 0 R": { stream: { dict: { "/Length": 5 } } }
+      })
+    );
+    expect(xfa.xfa).toBe(true);
+
+    const needs = classifyQpdfJson(
+      formDocument({ "/Fields": [] }, {}, {}, { hasacroform: true, needappearances: true, fields: [] })
+    );
+    expect(needs.needsRendering).toBe(true);
+    expect(needs.xfa).toBe(false);
+  });
+
+  it("makes encrypted, signed and XFA documents inadmissible for every operation", () => {
+    const base = { encrypted: false, ...classifyQpdfJson(jsonDocument(objectMap())) };
+    for (const flagged of [
+      { ...base, encrypted: true },
+      { ...base, signed: true },
+      { ...base, xfa: true }
+    ]) {
+      for (const operation of OPERATIONS) {
+        expect(isAdmissibleFor(flagged, operation)).toBe(false);
+      }
+    }
+  });
+});

@@ -46,6 +46,20 @@ export interface FixtureFeatures {
   formDictAction?: boolean;
   /** /OpenAction GoTo and /Launch actions pointing at each other through /Next. */
   cyclicActions?: boolean;
+  /** /FT /Sig field carrying no value: an empty signature widget. */
+  emptySignatureField?: boolean;
+  /** Catalog /Perms /UR3 usage-rights signature (Reader extensions). */
+  usageRights?: boolean;
+  /** Catalog /Perms /DocMDP document-modification permission signature. */
+  docMdpSignature?: boolean;
+  /** AcroForm /NeedAppearances true (needs a field-bearing feature). */
+  needAppearances?: boolean;
+  /** Static XFA: AcroForm /XFA packets without a datasets stream. */
+  xfaStatic?: boolean;
+  /** Static XFA whose /XFA packets include a datasets stream. */
+  xfaStaticWithDatasets?: boolean;
+  /** Dynamic-style XFA: /XFA packets and no interactive fields. */
+  xfaDynamic?: boolean;
 }
 
 function escapePdfText(value: string): string {
@@ -146,48 +160,103 @@ export function buildTestPdf(pages: FixturePage[], features: FixtureFeatures = {
     );
     catalogExtras.push(`/Outlines ${outlines} 0 R`);
   }
-  if (features.formTextField || features.signatureField) {
-    const widget = nextId++;
-    const field = nextId++;
+  const wantsFields =
+    features.formTextField ||
+    features.signatureField ||
+    features.emptySignatureField ||
+    features.xfaStatic ||
+    features.xfaStaticWithDatasets;
+  if (wantsFields || features.xfaDynamic) {
     const form = nextId++;
-    const widgetExtras: string[] = [];
+    const fieldIds: number[] = [];
+    const widgetIds: number[] = [];
     const formExtras: string[] = [];
-    if (features.widgetFieldAction) {
-      const format = extra("<< /S /JavaScript /JS (fixture-format) >>");
-      widgetExtras.push(`/AA << /F ${format} 0 R >>`);
+    const addField = (body: (widget: number) => string, widgetExtras: string[] = []): void => {
+      const widget = nextId++;
+      const field = nextId++;
+      fieldIds.push(field);
+      widgetIds.push(widget);
+      bodies.set(field, body(widget));
+      bodies.set(
+        widget,
+        `<< /Type /Annot /Subtype /Widget /Rect [100 100 200 120] /P ${pageIds[0]} 0 R /Parent ${field} 0 R${widgetExtras.length ? ` ${widgetExtras.join(" ")}` : ""} >>`
+      );
+    };
+    if (features.formTextField || features.xfaStatic || features.xfaStaticWithDatasets) {
+      const widgetExtras: string[] = [];
+      if (features.widgetFieldAction) {
+        const format = extra("<< /S /JavaScript /JS (fixture-format) >>");
+        widgetExtras.push(`/AA << /F ${format} 0 R >>`);
+      }
+      if (features.widgetChainedLaunch) {
+        const launch = extra("<< /S /Launch /Win << /P (fixture) >> >>");
+        const first = extra(`<< /S /GoTo /D [${pageIds[0]} 0 R /Fit] /Next ${launch} 0 R >>`);
+        widgetExtras.push(`/AA << /O ${first} 0 R >>`);
+      }
+      if (features.sharedCatalogAction) {
+        const shared = extra("<< /S /URI /URI (https://example.invalid/shared) >>");
+        catalogExtras.push(`/OpenAction ${shared} 0 R`);
+        widgetExtras.push(`/A ${shared} 0 R`);
+      }
+      addField((widget) => `<< /FT /Tx /T (fixture-name) /V () /Kids [${widget} 0 R] >>`, widgetExtras);
     }
-    if (features.widgetChainedLaunch) {
-      const launch = extra("<< /S /Launch /Win << /P (fixture) >> >>");
-      const first = extra(`<< /S /GoTo /D [${pageIds[0]} 0 R /Fit] /Next ${launch} 0 R >>`);
-      widgetExtras.push(`/AA << /O ${first} 0 R >>`);
+    if (features.signatureField) {
+      addField((widget) => {
+        const sigValue = extra("<< /Type /Sig /Filter /Adobe.PPKLite /ByteRange [0 100 200 300] >>");
+        return `<< /FT /Sig /T (fixture-sig) /V ${sigValue} 0 R /Kids [${widget} 0 R] >>`;
+      });
+    }
+    if (features.emptySignatureField) {
+      addField((widget) => `<< /FT /Sig /T (fixture-empty-sig) /Kids [${widget} 0 R] >>`);
     }
     if (features.formDictAction) {
       const action = extra("<< /S /JavaScript /JS (fixture-form-dict) >>");
       formExtras.push(`/AA << /O ${action} 0 R >>`);
     }
-    if (features.sharedCatalogAction) {
-      const shared = extra("<< /S /URI /URI (https://example.invalid/shared) >>");
-      catalogExtras.push(`/OpenAction ${shared} 0 R`);
-      widgetExtras.push(`/A ${shared} 0 R`);
+    if (features.needAppearances) {
+      formExtras.push("/NeedAppearances true");
     }
-    if (features.signatureField) {
-      const sigValue = extra("<< /Type /Sig /Filter /Adobe.PPKLite /ByteRange [0 100 200 300] >>");
-      bodies.set(
-        field,
-        `<< /FT /Sig /T (fixture-sig) /V ${sigValue} 0 R /Kids [${widget} 0 R] >>`
-      );
-    } else {
-      bodies.set(field, `<< /FT /Tx /T (fixture-name) /V () /Kids [${widget} 0 R] >>`);
+    if (features.xfaStatic || features.xfaStaticWithDatasets || features.xfaDynamic) {
+      const packet = (name: string, text: string): string => {
+        const id = extra(`<< /Length ${Buffer.byteLength(text, "latin1")} >>\nstream\n${text}\nendstream`);
+        return `(${name}) ${id} 0 R`;
+      };
+      const packets = [
+        packet("preamble", "<xdp>"),
+        packet("template", "<template><subform name=\"f\"/></template>")
+      ];
+      if (!features.xfaStatic) {
+        packets.push(packet("datasets", "<datasets/>"));
+      }
+      packets.push(packet("postamble", "</xdp>"));
+      formExtras.push(`/XFA [${packets.join(" ")}]`);
     }
     bodies.set(
-      widget,
-      `<< /Type /Annot /Subtype /Widget /Rect [100 100 200 120] /P ${pageIds[0]} 0 R /Parent ${field} 0 R${widgetExtras.length ? ` ${widgetExtras.join(" ")}` : ""} >>`
+      form,
+      `<<${fieldIds.length ? ` /Fields [${fieldIds.map((id) => `${id} 0 R`).join(" ")}]` : ""}${formExtras.length ? ` ${formExtras.join(" ")}` : ""} >>`
     );
-    bodies.set(form, `<< /Fields [${field} 0 R]${formExtras.length ? ` ${formExtras.join(" ")}` : ""} >>`);
     catalogExtras.push(`/AcroForm ${form} 0 R`);
-    const list = pageExtras.get(0) ?? [];
-    list.push(`/Annots [${widget} 0 R]`);
-    pageExtras.set(0, list);
+    if (widgetIds.length > 0) {
+      const list = pageExtras.get(0) ?? [];
+      list.push(`/Annots [${widgetIds.map((id) => `${id} 0 R`).join(" ")}]`);
+      pageExtras.set(0, list);
+    }
+  }
+  if (features.usageRights || features.docMdpSignature) {
+    const permsEntries: string[] = [];
+    if (features.usageRights) {
+      const rights = extra(
+        "<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 100 200 300] /Contents <00> /Reference [<< /TransformMethod /UR3 /TransformParams << /Type /TransformParams /V /2.2 >> >>] >>"
+      );
+      permsEntries.push(`/UR3 ${rights} 0 R`);
+    }
+    if (features.docMdpSignature) {
+      const mdp = extra(
+        "<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 100 200 300] /Contents <00> /Reference [<< /TransformMethod /DocMDP /TransformParams << /Type /TransformParams /P 1 /V /1.2 >> >>] >>"
+      );
+      permsEntries.push(`/DocMDP ${mdp} 0 R`);
+    }
+    catalogExtras.push(`/Perms << ${permsEntries.join(" ")} >>`);
   }
   if (features.nonTerminalFieldAction) {
     const widget = nextId++;
@@ -268,6 +337,26 @@ export async function writeTestPdf(
 
 export async function sha256File(path: string): Promise<string> {
   return createHash("sha256").update(await readFile(path)).digest("hex");
+}
+
+/**
+ * Encrypt a fixture with qpdf. An empty user password models the
+ * owner-restricted documents that open without one.
+ */
+export function encryptTestPdf(
+  input: string,
+  output: string,
+  userPassword: string,
+  ownerPassword: string,
+  restrictions: readonly string[] = []
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "qpdf",
+      ["--encrypt", userPassword, ownerPassword, "256", ...restrictions, "--", input, output],
+      (error) => (error ? reject(error) : resolve())
+    );
+  });
 }
 
 export interface QpdfPageEntry {

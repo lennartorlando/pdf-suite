@@ -106,6 +106,11 @@ function makeFakeRunner(state: FakeState, pagesByPath: Map<string, number>): Nat
     if (command === "qpdf" && args[0] === "--check") {
       return okResult("No syntax or stream encoding errors found");
     }
+    if (command === "qpdf" && args[0] === "--is-encrypted") {
+      // The only --json failure this fake models is a password-protected
+      // source, which is exactly what --is-encrypted reports via exit 0.
+      return { stdout: "", stderr: "", exitCode: state.failJsonWith !== undefined ? 0 : 2 };
+    }
     if (command === "qpdf" && args.includes("--pages")) {
       state.mutations += 1;
       await state.onMutation?.();

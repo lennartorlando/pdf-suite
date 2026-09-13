@@ -111,6 +111,11 @@ export async function ocrPdf(options: OcrPdfOptions): Promise<OcrSummary> {
     timeoutMs: options.timeoutMs ?? DEFAULT_OCR_TIMEOUT_MS
   };
   const inspection = await inspectPdfSource(options.inputPath, calls);
+  if (inspection.encrypted) {
+    throw new CompressionError("INPUT_ENCRYPTED", "Source PDF is encrypted.", {
+      inputPath: options.inputPath
+    });
+  }
   if (inspection.signed) {
     throw new CompressionError("INPUT_SIGNED", "Source PDF carries a digital signature.", {
       inputPath: options.inputPath

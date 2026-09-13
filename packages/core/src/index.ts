@@ -13,7 +13,13 @@ export {
 } from "./ocr.js";
 export { compressionProfiles, getCompressionProfile, type CompressionProfileName, type CompressionProfile } from "./profiles.js";
 export { createTempWorkspace, type TempWorkspace } from "./temp-workspace.js";
-export { validatePdfInput, assertFreshDestination, type PdfValidationResult } from "./validation.js";
+export {
+  validatePdfInput,
+  validatePdfFillInput,
+  assertFreshDestination,
+  type PdfValidationResult,
+  type PdfFillValidationResult
+} from "./validation.js";
 export type { CompressionEngine, EngineResult } from "./engines/types.js";
 export {
   assemblePages,
@@ -50,6 +56,7 @@ export {
   isAdmissibleFor,
   CLASSIFIER_NODE_BUDGET,
   inspectPdfSource,
+  admitFillSource,
   runQpdfAssemblyMutation,
   validatePdfArtifact,
   publishNoClobber,
@@ -61,6 +68,7 @@ export {
   type NativeRunner,
   type PageGroup,
   type AssemblyMutation,
-  type NativeCallOptions
+  type NativeCallOptions,
+  type FillAdmission
 } from "./engines/qpdf-pages.js";
 export { ghostscriptArgs } from "./engines/ghostscript.js";

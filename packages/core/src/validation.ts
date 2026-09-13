@@ -12,21 +12,18 @@ export interface PdfValidationHashResult extends PdfValidationResult {
   sha256: string;
 }
 
-async function validatePdfInputStream(
-  inputPath: string,
-  outputPath: string | undefined,
-  includeHash: false
-): Promise<PdfValidationResult>;
-async function validatePdfInputStream(
-  inputPath: string,
-  outputPath: string | undefined,
-  includeHash: true
-): Promise<PdfValidationHashResult>;
-async function validatePdfInputStream(
+interface PdfInputScan {
+  inputPath: string;
+  sizeBytes: number;
+  encrypted: boolean;
+  sha256?: string;
+}
+
+async function scanPdfInput(
   inputPath: string,
   outputPath: string | undefined,
   includeHash: boolean
-): Promise<PdfValidationResult | PdfValidationHashResult> {
+): Promise<PdfInputScan> {
   if (outputPath && inputPath === outputPath) {
     throw new CompressionError(
       "OUTPUT_WOULD_OVERWRITE_INPUT",
@@ -75,15 +72,35 @@ async function validatePdfInputStream(
     throw new CompressionError("INPUT_NOT_PDF", "Source file is not a supported PDF.");
   }
 
-  if (encrypted || /\/Encrypt\b/.test(scanTail)) {
-    throw new CompressionError("INPUT_ENCRYPTED", "Encrypted PDFs are not supported yet.");
-  }
-
   return {
     inputPath,
     sizeBytes: fileStat.size,
+    encrypted: encrypted || /\/Encrypt\b/.test(scanTail),
     ...(hash ? { sha256: hash.digest("hex") } : {})
   };
+}
+
+async function validatePdfInputStream(
+  inputPath: string,
+  outputPath: string | undefined,
+  includeHash: false
+): Promise<PdfValidationResult>;
+async function validatePdfInputStream(
+  inputPath: string,
+  outputPath: string | undefined,
+  includeHash: true
+): Promise<PdfValidationHashResult>;
+async function validatePdfInputStream(
+  inputPath: string,
+  outputPath: string | undefined,
+  includeHash: boolean
+): Promise<PdfValidationResult | PdfValidationHashResult> {
+  const scan = await scanPdfInput(inputPath, outputPath, includeHash);
+  if (scan.encrypted) {
+    throw new CompressionError("INPUT_ENCRYPTED", "Encrypted PDFs are not supported yet.");
+  }
+  const { encrypted: _encrypted, ...result } = scan;
+  return result;
 }
 
 export async function validatePdfInput(inputPath: string, outputPath?: string): Promise<PdfValidationResult> {
@@ -96,6 +113,28 @@ export async function validateAndHashPdfInput(
   outputPath?: string
 ): Promise<PdfValidationHashResult> {
   return validatePdfInputStream(inputPath, outputPath, true);
+}
+
+export interface PdfFillValidationResult extends PdfValidationResult {
+  /** True when the source carries an /Encrypt dictionary; see validatePdfFillInput. */
+  encrypted: boolean;
+}
+
+/**
+ * The fill path's input scan (KTD10): a separate function, not a parameter
+ * on the shared validator, so a decrypt-allowing option is never one default
+ * away from compression, assembly or OCR. It reports encryption instead of
+ * rejecting it: the caller runs an empty-password qpdf decryption pass next,
+ * and a document needing a real password is refused there. This scan must
+ * always run first: it is the only check before qpdf's decryption code
+ * touches attacker-controlled bytes in a process that is not sandboxed.
+ */
+export async function validatePdfFillInput(
+  inputPath: string,
+  outputPath?: string
+): Promise<PdfFillValidationResult> {
+  const { inputPath: scannedPath, sizeBytes, encrypted } = await scanPdfInput(inputPath, outputPath, false);
+  return { inputPath: scannedPath, sizeBytes, encrypted };
 }
 
 interface FileIdentity {

@@ -204,6 +204,12 @@ export async function inspectSources(
   for (const source of sources) {
     await validatePdfInput(source.path);
     const inspection = await inspectPdfSource(source.path, calls);
+    if (inspection.encrypted) {
+      throw new CompressionError("INPUT_ENCRYPTED", `Source "${source.id}" is encrypted.`, {
+        sourceId: source.id,
+        inputPath: source.path
+      });
+    }
     inspections.push({ ...inspection, path: source.path });
   }
   return inspections;
@@ -299,6 +305,12 @@ export async function assemblePages(options: AssemblePagesOptions): Promise<Asse
   const inspectionWarnings: string[] = [];
   for (const source of referencedSources) {
     const inspection = await inspectPdfSource(source.path, calls);
+    if (inspection.encrypted) {
+      throw new CompressionError("INPUT_ENCRYPTED", `Source "${source.id}" is encrypted.`, {
+        sourceId: source.id,
+        inputPath: source.path
+      });
+    }
     if (inspection.signed) {
       throw new CompressionError("INPUT_SIGNED", `Source "${source.id}" carries a digital signature.`, {
         sourceId: source.id,

@@ -3,6 +3,7 @@ export type CompressionErrorCode =
   | "INPUT_NOT_PDF"
   | "INPUT_ENCRYPTED"
   | "INPUT_SIGNED"
+  | "INPUT_XFA"
   | "INPUT_HAS_ACTIVE_CONTENT"
   | "INSPECTION_INCOMPLETE"
   | "OUTPUT_INVALID"

@@ -1,5 +1,7 @@
-import { link, unlink } from "node:fs/promises";
+import { chmod, link, unlink } from "node:fs/promises";
+import { join } from "node:path";
 import { CompressionError } from "../errors.js";
+import { validatePdfFillInput } from "../validation.js";
 import { runProcess, type ProcessResult, type RunProcessOptions } from "./process.js";
 
 /**
@@ -46,7 +48,14 @@ export interface PdfInspection {
   pdfVersion: string;
   qpdfVersion: string;
   encrypted: boolean;
+  /** True when the document carries a blocking signature per R16. */
   signed: boolean;
+  /** Every XFA document is refused for filling (R18). */
+  xfa: boolean;
+  /** Usage-rights signature present; it does not block, and filling removes it. */
+  usageRights: boolean;
+  /** /NeedAppearances: the document's field appearances must be regenerated. */
+  needsRendering: boolean;
   activeContent: ActiveContentFinding[];
   compatWarnings: CompatWarningKind[];
   /** qpdf stderr warnings (exit code 3 still yields a usable inspection). */
@@ -128,7 +137,7 @@ export async function getGhostscriptVersion(options: NativeCallOptions = {}): Pr
 interface QpdfJson {
   pages?: Array<{ object?: string }>;
   outlines?: unknown[];
-  acroform?: { hasacroform?: boolean; fields?: unknown[] };
+  acroform?: { hasacroform?: boolean; needappearances?: boolean; fields?: unknown[] };
   attachments?: Record<string, unknown>;
   encrypt?: { encrypted?: boolean };
   pagelabels?: unknown[];
@@ -178,14 +187,21 @@ const FILL_PERMITTED_FIELD_ACTIONS = new Set(["/JavaScript", "/SubmitForm", "/Re
 
 /**
  * The one admission policy shared by every operation (KTD4): signed input is
- * never admissible; compression, assembly and OCR admit no active content;
- * filling alone admits the field-bound actions it strips before delivery.
+ * never admissible, and neither is an XFA document (R18) or one that is still
+ * encrypted (the fill path inspects the decrypted working copy); compression,
+ * assembly and OCR admit no active content; filling alone admits the
+ * field-bound actions it strips before delivery.
  */
 export function isAdmissibleFor(
-  result: { signed: boolean; activeContent: readonly ActiveContentFinding[] },
+  result: {
+    encrypted: boolean;
+    signed: boolean;
+    xfa: boolean;
+    activeContent: readonly ActiveContentFinding[];
+  },
   operation: AdmissionOperation
 ): boolean {
-  if (result.signed) return false;
+  if (result.encrypted || result.signed || result.xfa) return false;
   if (operation === "fill") {
     return result.activeContent.every((finding) => {
       const scopeIndex = finding.lastIndexOf("@");
@@ -490,7 +506,11 @@ function fieldRoots(raw: QpdfJson, objects: Record<string, unknown>): string[] {
  * its reachable set throws INSPECTION_INCOMPLETE rather than admit.
  */
 export function classifyQpdfJson(raw: QpdfJson): {
+  encrypted: boolean;
   signed: boolean;
+  xfa: boolean;
+  usageRights: boolean;
+  needsRendering: boolean;
   activeContent: ActiveContentFinding[];
   compatWarnings: CompatWarningKind[];
 } {
@@ -500,11 +520,11 @@ export function classifyQpdfJson(raw: QpdfJson): {
   }
   const trailer = objectNode(objects["trailer"]);
   const rootRef = isDict(trailer) ? trailer["/Root"] : undefined;
-  if (
-    typeof rootRef !== "string" ||
-    !OBJECT_REF.test(rootRef) ||
-    !isDict(objects[`obj:${rootRef}`])
-  ) {
+  const catalogNode =
+    typeof rootRef === "string" && OBJECT_REF.test(rootRef)
+      ? objectNode(objects[`obj:${rootRef}`])
+      : undefined;
+  if (typeof rootRef !== "string" || !OBJECT_REF.test(rootRef) || !isDict(catalogNode)) {
     throw incomplete("trailer lacks a resolvable document catalog");
   }
 
@@ -530,29 +550,92 @@ export function classifyQpdfJson(raw: QpdfJson): {
     walk.findings.set("attachments|embedded-files", "embedded-files@catalog");
   }
 
-  // A document signature (/Sig field, /DocMDP permissions, /ByteRange) must
-  // block page export: assembly would invalidate it silently.
-  const objectsText = JSON.stringify(objects);
-  const signed =
-    /\/Sig\b/.test(objectsText) ||
-    /\/DocMDP\b/.test(objectsText) ||
-    /\/ByteRange\b/.test(objectsText);
+  // Signature rule (R16): a signature field holding a value, and a
+  // document-modification permission signature (/Perms /DocMDP), block every
+  // operation. A usage-rights signature (/Perms /UR or /UR3) does not block;
+  // an empty signature widget, a /Sig field without a /V value, does not
+  // either, which is the case a name scan gets wrong because the field type
+  // itself contains the name it looks for.
+  const deref = (node: unknown): unknown =>
+    typeof node === "string" && OBJECT_REF.test(node)
+      ? objectNode(objects[`obj:${node}`])
+      : node;
+  const perms = deref(catalogNode["/Perms"]);
+  const usageRightRefs = new Set<string>();
+  let usageRights = false;
+  if (isDict(perms)) {
+    for (const key of ["/UR", "/UR3"]) {
+      const target = perms[key];
+      if (target !== undefined && target !== null) usageRights = true;
+      if (typeof target === "string" && OBJECT_REF.test(target)) {
+        usageRightRefs.add(`obj:${target}`);
+      }
+    }
+  }
+  const acroformDict = deref(catalogNode["/AcroForm"]);
+  const xfa = isDict(acroformDict) && "/XFA" in acroformDict;
+  const needsRendering =
+    raw.acroform?.needappearances === true ||
+    (isDict(acroformDict) && acroformDict["/NeedAppearances"] === true);
+
+  let signed = isDict(perms) && "/DocMDP" in perms;
+  for (const key of Object.keys(objects)) {
+    if (!key.startsWith("obj:")) continue;
+    const node = objectNode(objects[key]);
+    if (!isDict(node)) continue;
+    // A signature value dictionary is a held signature wherever it sits,
+    // except the usage-rights entries referenced from /Perms.
+    if (!usageRightRefs.has(key) && ("/ByteRange" in node || node["/Type"] === "/Sig")) {
+      signed = true;
+    }
+    if (node["/FT"] === "/Sig" && node["/V"] !== undefined && node["/V"] !== null) {
+      signed = true;
+    }
+  }
 
   const compatWarnings: CompatWarningKind[] = [];
   if (raw.acroform?.hasacroform === true || (raw.acroform?.fields?.length ?? 0) > 0) {
     compatWarnings.push("forms");
   }
   if ((raw.outlines?.length ?? 0) > 0) compatWarnings.push("bookmarks");
+  const objectsText = JSON.stringify(objects);
   if (/\/StructTreeRoot\b/.test(objectsText) || /\/MarkInfo\b/.test(objectsText)) {
     compatWarnings.push("tags");
   }
   if ((raw.pagelabels?.length ?? 0) > 0) compatWarnings.push("page-labels");
 
-  return { signed, activeContent: [...walk.findings.values()], compatWarnings };
+  return {
+    encrypted: raw.encrypt?.encrypted === true,
+    signed,
+    xfa,
+    usageRights,
+    needsRendering,
+    activeContent: [...walk.findings.values()],
+    compatWarnings
+  };
 }
 
-function isPasswordError(stderr: string): boolean {
-  return /invalid password|incorrect password|password/i.test(stderr) && /password/i.test(stderr);
+/**
+ * Probe an input qpdf failed to open: --is-encrypted exits 0 when the file
+ * carries an /Encrypt dictionary (meaning it needed a password the caller
+ * did not supply) and 2 when it does not. The decision reads the exit code,
+ * never the wording of qpdf's stderr (KTD10).
+ */
+async function probeIsEncrypted(
+  sourcePath: string,
+  run: NativeRunner,
+  options: NativeCallOptions
+): Promise<boolean> {
+  try {
+    const probe = await run(
+      "qpdf",
+      ["--is-encrypted", "--", sourcePath],
+      childOptions(options, { allowedExitCodes: [0, 2] })
+    );
+    return probe.exitCode === 0;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -574,7 +657,7 @@ export async function inspectPdfSource(
   } catch (error) {
     if (error instanceof CompressionError && error.code === "ENGINE_FAILED") {
       const stderr = String((error.details?.["stderr"] as string | undefined) ?? "");
-      if (isPasswordError(stderr) || /\/Encrypt\b/.test(stderr)) {
+      if (await probeIsEncrypted(sourcePath, run, options)) {
         throw new CompressionError("INPUT_ENCRYPTED", `Source PDF is encrypted: ${sourcePath}.`, {
           inputPath: sourcePath
         });
@@ -607,24 +690,116 @@ export async function inspectPdfSource(
       { inputPath: sourcePath }
     );
   }
-  if (parsed.encrypt?.encrypted === true) {
-    throw new CompressionError("INPUT_ENCRYPTED", `Source PDF is encrypted: ${sourcePath}.`, {
-      inputPath: sourcePath
-    });
-  }
-
-  const { signed, activeContent, compatWarnings } = classifyQpdfJson(parsed);
+  const classified = classifyQpdfJson(parsed);
+  const { signed, xfa, usageRights, needsRendering, activeContent, compatWarnings } = classified;
   return {
     path: sourcePath,
     pageCount: parsed.pages.length,
     pdfVersion: parsed.qpdf?.[0]?.pdfversion ?? "unknown",
     qpdfVersion,
-    encrypted: false,
+    // Reported, not refused here: the streaming scan refuses encrypted input
+    // on every other path before qpdf runs, the fill path decrypts first, and
+    // the artifact gate below refuses an encrypted produced file.
+    encrypted: classified.encrypted,
     signed,
+    xfa,
+    usageRights,
+    needsRendering,
     activeContent,
     compatWarnings,
     warnings: result.stderr ? [result.stderr] : []
   };
+}
+
+export interface FillAdmission {
+  /** Decrypted working copy inside the job workspace; the fill writes against it. */
+  workingPath: string;
+  /** The unmodified inspector's result for the decrypted working copy. */
+  inspection: PdfInspection;
+  /**
+   * The source carried an /Encrypt dictionary, so the delivered file loses
+   * the printing, copying and modification restrictions its author set: an
+   * empty user password includes every owner-password-only document
+   * (KTD10, KD6). Reported, never implied.
+   */
+  removedRestrictions: boolean;
+  /** The source carried a usage-rights signature that filling removes. */
+  removedUsageRights: boolean;
+}
+
+/**
+ * Fill-path admission (KTD10): the only path that tolerates encrypted input.
+ * The cheap streaming scan runs first; it is the only check that runs
+ * before qpdf's decryption code touches attacker-controlled bytes in a
+ * process that is not sandboxed. Then an empty-password decryption pass
+ * writes the working copy, and the completely unmodified inspector runs on
+ * it. A document that still refuses to decrypt is probed by qpdf's exit
+ * code, never by matching words in tool output: still encrypted means it
+ * needs a real password and is refused like everywhere else; anything else
+ * is an incomplete inspection.
+ */
+export async function admitFillSource(
+  sourcePath: string,
+  workspacePath: string,
+  options: NativeCallOptions = {}
+): Promise<FillAdmission> {
+  const run = options.run ?? defaultNativeRunner;
+  const scan = await validatePdfFillInput(sourcePath);
+  const workingPath = join(workspacePath, "decrypted-source.pdf");
+  try {
+    await run(
+      "qpdf",
+      ["--decrypt", "--password=", "--", sourcePath, workingPath],
+      childOptions(options, { allowedExitCodes: [0, 3] })
+    );
+  } catch (error) {
+    await unlink(workingPath).catch(() => undefined);
+    if (!(error instanceof CompressionError) || error.code !== "ENGINE_FAILED") throw error;
+    if (await probeIsEncrypted(sourcePath, run, options)) {
+      throw new CompressionError("INPUT_ENCRYPTED", `Source PDF needs a password: ${sourcePath}.`, {
+        inputPath: sourcePath
+      });
+    }
+    throw new CompressionError(
+      "INSPECTION_INCOMPLETE",
+      `qpdf could not decrypt ${sourcePath}; treating inspection as incomplete.`,
+      { inputPath: sourcePath }
+    );
+  }
+  // The working copy holds the document's personal data: owner-readable only (R29).
+  await chmod(workingPath, 0o600);
+
+  try {
+    const inspection = await inspectPdfSource(workingPath, options);
+    if (inspection.signed) {
+      throw new CompressionError("INPUT_SIGNED", "Source PDF carries a digital signature.", {
+        inputPath: sourcePath
+      });
+    }
+    if (inspection.xfa) {
+      throw new CompressionError(
+        "INPUT_XFA",
+        "Source PDF uses XFA forms; filling cannot preserve the XFA representation, so every XFA document is refused.",
+        { inputPath: sourcePath, xfa: true }
+      );
+    }
+    if (!isAdmissibleFor(inspection, "fill")) {
+      throw new CompressionError(
+        "INPUT_HAS_ACTIVE_CONTENT",
+        `Source PDF contains blocked active content (${inspection.activeContent.join(", ")}).`,
+        { inputPath: sourcePath, activeContent: inspection.activeContent }
+      );
+    }
+    return {
+      workingPath,
+      inspection: { ...inspection, path: sourcePath },
+      removedRestrictions: scan.encrypted,
+      removedUsageRights: inspection.usageRights
+    };
+  } catch (error) {
+    await unlink(workingPath).catch(() => undefined);
+    throw error;
+  }
 }
 
 export interface PageGroup {
@@ -705,13 +880,14 @@ export async function validatePdfArtifact(
       outputPath: candidatePath
     });
   }
-  if (inspection.signed || inspection.activeContent.length > 0) {
+  if (inspection.signed || inspection.xfa || inspection.activeContent.length > 0) {
     throw new CompressionError(
       "OUTPUT_INVALID",
-      "Final PDF contains blocked signatures or active content.",
+      "Final PDF contains blocked signatures, XFA or active content.",
       {
         outputPath: candidatePath,
         signed: inspection.signed,
+        xfa: inspection.xfa,
         activeContent: inspection.activeContent
       }
     );
