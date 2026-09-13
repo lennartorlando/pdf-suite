@@ -30,6 +30,8 @@ export const FILL_CHILD_TIMEOUT_MS = 60_000;
 
 const FILL_CHILD_MAX_STDOUT_BYTES = 64 * 1024;
 const FILL_CHILD_MAX_OUTCOME_BYTES = 16 * 1024;
+/** Bound on the inspect-mode field dump read back by the parent. */
+const INSPECT_CHILD_MAX_FIELDS_BYTES = 16 * 1024 * 1024;
 
 const HEAP_LIMIT_PATTERN = /heap limit|heap out of memory/i;
 
@@ -53,6 +55,45 @@ export interface FillChildOutcome {
   bytes: number;
 }
 
+export interface InspectChildRequest {
+  /** Absolute path of the admitted source PDF; never written by the child. */
+  sourcePath: string;
+  /** Path the child writes the bounded `getFieldObjects` dump to. */
+  fieldsPath: string;
+  /** Path of the bounded structured outcome file. */
+  outcomePath: string;
+  /** Private job directory: the child's working directory and scratch space. */
+  workspacePath: string;
+}
+
+/**
+ * One `getFieldObjects` entry as the child serializes it. The parent treats
+ * every value as untrusted document-derived data and applies the inventory
+ * schema bounds before anything is emitted (KTD6, R35).
+ */
+export interface InspectedFieldEntry {
+  name: string;
+  id?: string;
+  kidIds?: string[];
+  type?: string;
+  value?: unknown;
+  exportValues?: string;
+  page?: number;
+  rect?: number[];
+  charLimit?: number;
+  comb?: boolean;
+  multiline?: boolean;
+  password?: boolean;
+  hidden?: boolean;
+  readOnly?: boolean;
+  editable?: boolean;
+  required?: boolean;
+  noExport?: boolean;
+  hasAppearance?: boolean;
+  items?: { exportValue?: string; displayValue?: string }[];
+  actionKeys?: string[];
+}
+
 /**
  * Absolute path of the child entry beside this module. In the source layout
  * the sibling is the `.ts` file (Node runs it with type stripping); in the
@@ -69,31 +110,7 @@ function isHeapLimitFailure(error: CompressionError): boolean {
 }
 
 async function readOutcome(request: FillChildRequest): Promise<FillChildOutcome> {
-  let raw: string;
-  try {
-    const info = await stat(request.outcomePath);
-    if (info.size > FILL_CHILD_MAX_OUTCOME_BYTES) {
-      throw new CompressionError("ENGINE_FAILED", "The fill child wrote an oversized outcome file.", {
-        outcomePath: request.outcomePath,
-        outcomeBytes: info.size
-      });
-    }
-    raw = await readFile(request.outcomePath, "utf8");
-  } catch (error) {
-    if (isCompressionError(error)) throw error;
-    throw new CompressionError("ENGINE_FAILED", "The fill child exited without writing an outcome file.", {
-      outcomePath: request.outcomePath
-    });
-  }
-  let outcome: unknown;
-  try {
-    outcome = JSON.parse(raw);
-  } catch {
-    throw new CompressionError("ENGINE_FAILED", "The fill child wrote a malformed outcome file.", {
-      outcomePath: request.outcomePath
-    });
-  }
-  const record = outcome as { status?: unknown; bytes?: unknown; code?: unknown; message?: unknown };
+  const record = await readOutcomeRecord(request.outcomePath);
   if (record.status === "filled" && typeof record.bytes === "number") {
     try {
       await stat(request.candidatePath);
@@ -111,33 +128,16 @@ async function readOutcome(request: FillChildRequest): Promise<FillChildOutcome>
       { candidatePath: request.candidatePath, maxOutputBytes: request.maxOutputBytes }
     );
   }
-  const message =
-    typeof record.message === "string" ? record.message : `outcome status ${String(record.status)}`;
-  throw new CompressionError("ENGINE_FAILED", `The fill child failed: ${message}`, {
-    outcomePath: request.outcomePath
-  });
+  throwOutcomeFailure(record, request.outcomePath);
 }
 
-/**
- * Run the fill child against paths in a private workspace. Resolves with the
- * produced byte count, or rejects with OUTPUT_TOO_LARGE / JOB_CANCELLED /
- * JOB_TIMEOUT / FILL_CHILD_OUT_OF_MEMORY / ENGINE_FAILED.
- */
-export async function runFillChild(
-  request: FillChildRequest,
-  options: NativeCallOptions & { heapSizeMb?: number } = {}
-): Promise<FillChildOutcome> {
+async function spawnChild(
+  args: readonly string[],
+  request: { workspacePath: string },
+  options: NativeCallOptions & { heapSizeMb?: number }
+): Promise<void> {
   const run = options.run ?? defaultNativeRunner;
   const heapSizeMb = options.heapSizeMb ?? FILL_CHILD_HEAP_SIZE_MB;
-  const args = [
-    `--max-old-space-size=${heapSizeMb}`,
-    fillChildEntryPath(),
-    `--source=${request.sourcePath}`,
-    `--plan=${request.planPath}`,
-    `--candidate=${request.candidatePath}`,
-    `--outcome=${request.outcomePath}`,
-    `--max-bytes=${request.maxOutputBytes}`
-  ];
   try {
     await run(process.execPath, args, {
       signal: options.signal,
@@ -156,5 +156,114 @@ export async function runFillChild(
     }
     throw error;
   }
+}
+
+/**
+ * Run the fill child against paths in a private workspace. Resolves with the
+ * produced byte count, or rejects with OUTPUT_TOO_LARGE / JOB_CANCELLED /
+ * JOB_TIMEOUT / FILL_CHILD_OUT_OF_MEMORY / ENGINE_FAILED.
+ */
+export async function runFillChild(
+  request: FillChildRequest,
+  options: NativeCallOptions & { heapSizeMb?: number } = {}
+): Promise<FillChildOutcome> {
+  const heapSizeMb = options.heapSizeMb ?? FILL_CHILD_HEAP_SIZE_MB;
+  const args = [
+    `--max-old-space-size=${heapSizeMb}`,
+    fillChildEntryPath(),
+    `--source=${request.sourcePath}`,
+    `--plan=${request.planPath}`,
+    `--candidate=${request.candidatePath}`,
+    `--outcome=${request.outcomePath}`,
+    `--max-bytes=${request.maxOutputBytes}`
+  ];
+  await spawnChild(args, request, options);
   return readOutcome(request);
+}
+
+interface ChildOutcomeRecord {
+  status?: unknown;
+  bytes?: unknown;
+  code?: unknown;
+  message?: unknown;
+}
+
+async function readOutcomeRecord(outcomePath: string): Promise<ChildOutcomeRecord> {
+  let raw: string;
+  try {
+    const info = await stat(outcomePath);
+    if (info.size > FILL_CHILD_MAX_OUTCOME_BYTES) {
+      throw new CompressionError("ENGINE_FAILED", "The fill child wrote an oversized outcome file.", {
+        outcomePath,
+        outcomeBytes: info.size
+      });
+    }
+    raw = await readFile(outcomePath, "utf8");
+  } catch (error) {
+    if (isCompressionError(error)) throw error;
+    throw new CompressionError("ENGINE_FAILED", "The fill child exited without writing an outcome file.", {
+      outcomePath
+    });
+  }
+  try {
+    return JSON.parse(raw) as ChildOutcomeRecord;
+  } catch {
+    throw new CompressionError("ENGINE_FAILED", "The fill child wrote a malformed outcome file.", {
+      outcomePath
+    });
+  }
+}
+
+function throwOutcomeFailure(record: ChildOutcomeRecord, outcomePath: string): never {
+  const message =
+    typeof record.message === "string" ? record.message : `outcome status ${String(record.status)}`;
+  throw new CompressionError("ENGINE_FAILED", `The fill child failed: ${message}`, { outcomePath });
+}
+
+/**
+ * Run the child in inspect mode: it writes the `getFieldObjects` dump to
+ * `fieldsPath` and the parent reads it back under a byte bound. Resolves
+ * with the serialized field entries, or rejects with the same error
+ * contract as `runFillChild`.
+ */
+export async function runInspectChild(
+  request: InspectChildRequest,
+  options: NativeCallOptions & { heapSizeMb?: number } = {}
+): Promise<InspectedFieldEntry[]> {
+  const heapSizeMb = options.heapSizeMb ?? FILL_CHILD_HEAP_SIZE_MB;
+  const args = [
+    `--max-old-space-size=${heapSizeMb}`,
+    fillChildEntryPath(),
+    "--mode=inspect",
+    `--source=${request.sourcePath}`,
+    `--fields=${request.fieldsPath}`,
+    `--outcome=${request.outcomePath}`
+  ];
+  await spawnChild(args, request, options);
+  const record = await readOutcomeRecord(request.outcomePath);
+  if (record.status !== "inspected") {
+    throwOutcomeFailure(record, request.outcomePath);
+  }
+  let parsed: { fields?: unknown };
+  try {
+    const info = await stat(request.fieldsPath);
+    if (info.size > INSPECT_CHILD_MAX_FIELDS_BYTES) {
+      throw new CompressionError("ENGINE_FAILED", "The fill child wrote an oversized field dump.", {
+        fieldsPath: request.fieldsPath,
+        fieldsBytes: info.size
+      });
+    }
+    parsed = JSON.parse(await readFile(request.fieldsPath, "utf8")) as { fields?: unknown };
+  } catch (error) {
+    if (isCompressionError(error)) throw error;
+    throw new CompressionError("ENGINE_FAILED", "The fill child wrote no readable field dump.", {
+      fieldsPath: request.fieldsPath
+    });
+  }
+  if (!Array.isArray(parsed.fields)) {
+    throw new CompressionError("ENGINE_FAILED", "The fill child wrote a malformed field dump.", {
+      fieldsPath: request.fieldsPath
+    });
+  }
+  return parsed.fields as InspectedFieldEntry[];
 }

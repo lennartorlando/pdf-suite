@@ -70,3 +70,62 @@ export async function outputContainsMarker(outputPath: string, marker: string): 
   });
   return text.includes(marker);
 }
+
+/** Bytes that must not appear in a delivered file (superseded values, removed scripts). */
+export async function outputOmitsBytes(outputPath: string, bytes: string): Promise<boolean> {
+  const content = await readFile(outputPath);
+  return !content.includes(Buffer.from(bytes, "latin1"));
+}
+
+interface QpdfAcroformRow {
+  object?: string;
+  parent?: string | null;
+  annotation?: { object?: string; appearancestate?: string };
+  fullname?: string;
+  value?: unknown;
+}
+
+/** qpdf's JSON spellings of a text value: plain, "u:" utf-8 or "b:" hex bytes. */
+function decodeValue(value: unknown): string {
+  if (typeof value !== "string") return "";
+  if (value.startsWith("u:")) return value.slice(2);
+  if (value.startsWith("b:")) {
+    const bytes = Buffer.from(value.slice(2), "hex");
+    if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+      const swapped = Buffer.alloc(bytes.length - 2);
+      for (let index = 2; index + 1 < bytes.length; index += 2) {
+        swapped[index - 2] = bytes[index + 1];
+        swapped[index - 1] = bytes[index];
+      }
+      return swapped.toString("utf16le");
+    }
+    return bytes.toString("latin1");
+  }
+  if (value.startsWith("/")) return value.slice(1);
+  return value;
+}
+
+async function readAcroformRows(path: string): Promise<QpdfAcroformRow[]> {
+  const { stdout } = await runQpdfJson(path);
+  const fields = (JSON.parse(stdout) as { acroform?: { fields?: QpdfAcroformRow[] } }).acroform?.fields;
+  return Array.isArray(fields) ? fields : [];
+}
+
+/**
+ * Interactive readback: the current /V value of every widget row of one
+ * field, plus each widget's appearance state. Field identity is the field
+ * dictionary's object reference (row.parent, or the row's own object for a
+ * merged field/widget dictionary).
+ */
+export async function readFieldRows(
+  path: string,
+  fieldRef: string
+): Promise<{ value: string; appearanceState: string }[]> {
+  const rows = await readAcroformRows(path);
+  return rows
+    .filter((row) => row.parent === fieldRef || row.object === fieldRef)
+    .map((row) => {
+      const state = row.annotation?.appearancestate ?? "";
+      return { value: decodeValue(row.value), appearanceState: state.startsWith("/") ? state.slice(1) : state };
+    });
+}

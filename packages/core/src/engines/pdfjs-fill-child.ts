@@ -5,14 +5,23 @@
  *     --source=<path> --plan=<path> --candidate=<path> --outcome=<path> \
  *     --max-bytes=<n>
  *
+ * and by `runInspectChild` as
+ *
+ *   node --max-old-space-size=<mb> pdfjs-fill-child.(js|ts) \
+ *     --mode=inspect --source=<path> --fields=<path> --outcome=<path>
+ *
  * Contract:
  * - No document bytes cross a pipe. Inputs arrive as paths; the produced PDF
  *   lands only at the candidate path; the sole report back is a small
- *   structured outcome file (never stderr).
+ *   structured outcome file (never stderr). In inspect mode nothing is
+ *   produced but the bounded fields file: `getFieldObjects` serialized so
+ *   the parent can join PDF.js addressing and geometry with qpdf semantics
+ *   without loading the renderer in-process.
  * - The outcome file first carries a `running` marker with diagnostics, then
- *   exactly one terminal status: `filled`, `refused` or `failed`. The child
- *   exits 0 once a terminal outcome is written; a nonzero exit means the
- *   child died before reporting (including a heap-limit kill).
+ *   exactly one terminal status: `filled`, `inspected`, `refused` or
+ *   `failed`. The child exits 0 once a terminal outcome is written; a
+ *   nonzero exit means the child died before reporting (including a
+ *   heap-limit kill).
  * - The heap cap arrives through the `--max-old-space-size` argv entry, not
  *   the environment: the runner's minimal environment deliberately drops
  *   NODE_OPTIONS.
@@ -33,6 +42,7 @@ import type { PDFDocumentProxy } from "pdfjs-dist";
 import type { FormPlan, PdfRect } from "../form-plan.js";
 
 const MAX_PLAN_BYTES = 512 * 1024;
+const MAX_FIELDS_BYTES = 8 * 1024 * 1024;
 const MESSAGE_LIMIT = 400;
 const SIGNATURE_THICKNESS = 1.6;
 const CHECKMARK_THICKNESS = 2.4;
@@ -44,9 +54,11 @@ const ANNOTATION_TYPE_INK = 15;
 const ANNOTATION_TYPE_SIGNATURE = 101;
 
 interface FillChildArgs {
+  mode: "fill" | "inspect";
   source: string;
-  plan: string;
-  candidate: string;
+  plan?: string;
+  candidate?: string;
+  fields?: string;
   outcome: string;
   maxBytes: number;
 }
@@ -61,6 +73,7 @@ interface ChildDiagnostics {
 type ChildOutcome =
   | { status: "running"; child: ChildDiagnostics }
   | { status: "filled"; bytes: number; child: ChildDiagnostics }
+  | { status: "inspected"; bytes: number; child: ChildDiagnostics }
   | { status: "refused"; code: "OUTPUT_TOO_LARGE"; producedBytes: number; maxBytes: number; child: ChildDiagnostics }
   | { status: "failed"; code: "ENGINE_FAILED"; message: string; child: ChildDiagnostics };
 
@@ -76,11 +89,30 @@ function parseArgs(argv: readonly string[]): FillChildArgs {
     if (value === undefined || value === "") throw new Error(`Missing --${key} argument.`);
     return value;
   };
-  const maxBytes = Number(take("max-bytes"));
+  const optional = (key: string): string | undefined => {
+    const value = values.get(key);
+    return value === undefined || value === "" ? undefined : value;
+  };
+  const mode = values.get("mode") ?? "fill";
+  if (mode !== "fill" && mode !== "inspect") {
+    throw new Error(`Unrecognized --mode "${mode}".`);
+  }
+  const maxBytesValue = optional("max-bytes");
+  const maxBytes = maxBytesValue === undefined ? 0 : Number(maxBytesValue);
   if (!Number.isInteger(maxBytes) || maxBytes < 0) {
     throw new Error("--max-bytes must be a non-negative integer.");
   }
+  if (mode === "inspect") {
+    return {
+      mode,
+      source: take("source"),
+      fields: take("fields"),
+      outcome: take("outcome"),
+      maxBytes
+    };
+  }
   return {
+    mode,
     source: take("source"),
     plan: take("plan"),
     candidate: take("candidate"),
@@ -118,6 +150,44 @@ interface FieldObjectEntry {
   id: string;
   kidIds?: string[];
   type?: string;
+  exportValues?: string;
+}
+
+/**
+ * The annotation ids a field entry must write: every widget the field owns,
+ * so no sibling is left stale (KTD5, R12). A widget-level plan identifier
+ * resolves to the whole set through the group entry that lists it as a kid;
+ * a merged field/widget dictionary writes itself.
+ */
+function widgetIdsOf(
+  target: FieldObjectEntry,
+  groups: FieldObjectEntry[][]
+): string[] {
+  if (target.kidIds && target.kidIds.length > 0) return target.kidIds;
+  for (const list of groups) {
+    for (const entry of list) {
+      if (entry.kidIds && entry.kidIds.includes(target.id)) return entry.kidIds;
+    }
+  }
+  return [target.id];
+}
+
+/**
+ * Checkbox and radio widgets take a boolean: on when the widget's own
+ * export value is the approved one. A checkbox has exactly one non-Off
+ * state, so any approved non-Off value checks it — the plan may spell the
+ * export value or the appearance-state name where they differ. A radio
+ * widget turns on only when its own export value is approved; siblings get
+ * false so the group settles on one selection.
+ */
+function widgetValue(entry: FieldObjectEntry | undefined, value: string): { value: string | boolean } {
+  if (entry?.type === "checkbox") {
+    return { value: value !== "" && value !== "Off" };
+  }
+  if (entry?.type === "radiobutton") {
+    return { value: entry.exportValues === value };
+  }
+  return { value };
 }
 
 /**
@@ -161,12 +231,18 @@ async function applyPlan(doc: PDFDocumentProxy, plan: FormPlan): Promise<void> {
 
   const fieldObjects = await doc.getFieldObjects();
   const fieldsById = new Map<string, FieldObjectEntry>();
+  const groups: FieldObjectEntry[][] = [];
   if (fieldObjects) {
     for (const list of fieldObjects.values()) {
+      const group: FieldObjectEntry[] = [];
       for (const entry of list) {
         const probe = entry as FieldObjectEntry;
-        if (typeof probe?.id === "string") fieldsById.set(probe.id, probe);
+        if (typeof probe?.id === "string") {
+          fieldsById.set(probe.id, probe);
+          group.push(probe);
+        }
       }
+      groups.push(group);
     }
   }
 
@@ -175,9 +251,8 @@ async function applyPlan(doc: PDFDocumentProxy, plan: FormPlan): Promise<void> {
       if (entry.status !== "answered") continue;
       const target = fieldsById.get(pdfJsKey(entry.fieldId));
       if (!target) throw new Error(`Plan names a field the document does not contain: "${entry.fieldId}".`);
-      const ids = target.kidIds && target.kidIds.length > 0 ? target.kidIds : [target.id];
-      for (const id of ids) {
-        storage.setValue(id, { value: entry.value });
+      for (const id of widgetIdsOf(target, groups)) {
+        storage.setValue(id, widgetValue(fieldsById.get(id), entry.value));
       }
       continue;
     }
@@ -232,6 +307,66 @@ async function applyPlan(doc: PDFDocumentProxy, plan: FormPlan): Promise<void> {
   }
 }
 
+/**
+ * The inventory-facing projection of one `getFieldObjects` entry: only the
+ * addressing, geometry, flags and action-event names the parent joins with
+ * qpdf's field semantics (KTD6). Nothing document-derived is trusted here;
+ * the parent applies the inventory schema caps.
+ */
+function serializeFieldEntry(name: string, entry: unknown): Record<string, unknown> {
+  const source = entry as Record<string, unknown>;
+  const out: Record<string, unknown> = { name };
+  const copyKeys = [
+    "id",
+    "type",
+    "value",
+    "defaultValue",
+    "exportValues",
+    "page",
+    "rect",
+    "charLimit",
+    "comb",
+    "multiline",
+    "password",
+    "hidden",
+    "readOnly",
+    "editable",
+    "required",
+    "noExport",
+    "hasAppearance"
+  ] as const;
+  for (const key of copyKeys) {
+    if (source[key] !== undefined) out[key] = source[key];
+  }
+  if (Array.isArray(source["kidIds"])) out["kidIds"] = source["kidIds"];
+  if (Array.isArray(source["items"])) out["items"] = source["items"];
+  const actions = source["actions"];
+  if (actions instanceof Map) {
+    out["actionKeys"] = [...actions.keys()];
+  } else if (typeof actions === "object" && actions !== null) {
+    out["actionKeys"] = Object.keys(actions);
+  }
+  return out;
+}
+
+async function writeFieldDump(doc: PDFDocumentProxy, fieldsPath: string): Promise<number> {
+  const fieldObjects = await doc.getFieldObjects();
+  const fields: Record<string, unknown>[] = [];
+  if (fieldObjects) {
+    for (const [name, list] of fieldObjects) {
+      for (const entry of list) {
+        fields.push(serializeFieldEntry(name, entry));
+      }
+    }
+  }
+  const json = JSON.stringify({ fields });
+  if (json.length > MAX_FIELDS_BYTES) {
+    throw new Error(`Field inventory dump exceeds the ${MAX_FIELDS_BYTES} byte bound.`);
+  }
+  await writeFile(fieldsPath, json, { mode: FILE_MODE });
+  return json.length;
+}
+
 async function readPlan(path: string): Promise<FormPlan> {
   const info = await stat(path);
   if (info.size > MAX_PLAN_BYTES) {
@@ -266,7 +401,6 @@ async function main(): Promise<void> {
   await writeOutcome(args.outcome, { status: "running", child });
 
   try {
-    const plan = await readPlan(args.plan);
     const { getDocument } = await import("pdfjs-dist/legacy/build/pdf.mjs");
     const data = new Uint8Array(await readFile(args.source));
     // `isEvalSupported` and `enableScripting` are honored by the runtime but
@@ -283,20 +417,26 @@ async function main(): Promise<void> {
     const loadingTask = getDocument(params);
     const doc = await loadingTask.promise;
     try {
-      await applyPlan(doc, plan);
-      const bytes = await doc.saveDocument();
-      if (bytes.length > args.maxBytes) {
-        await writeOutcome(args.outcome, {
-          status: "refused",
-          code: "OUTPUT_TOO_LARGE",
-          producedBytes: bytes.length,
-          maxBytes: args.maxBytes,
-          child
-        });
-        return;
+      if (args.mode === "inspect") {
+        const bytes = await writeFieldDump(doc, args.fields ?? "");
+        await writeOutcome(args.outcome, { status: "inspected", bytes, child });
+      } else {
+        const plan = await readPlan(args.plan ?? "");
+        await applyPlan(doc, plan);
+        const bytes = await doc.saveDocument();
+        if (bytes.length > args.maxBytes) {
+          await writeOutcome(args.outcome, {
+            status: "refused",
+            code: "OUTPUT_TOO_LARGE",
+            producedBytes: bytes.length,
+            maxBytes: args.maxBytes,
+            child
+          });
+          return;
+        }
+        await writeFile(args.candidate ?? "", bytes, { mode: FILE_MODE });
+        await writeOutcome(args.outcome, { status: "filled", bytes: bytes.length, child });
       }
-      await writeFile(args.candidate, bytes, { mode: FILE_MODE });
-      await writeOutcome(args.outcome, { status: "filled", bytes: bytes.length, child });
     } finally {
       await loadingTask.destroy();
     }

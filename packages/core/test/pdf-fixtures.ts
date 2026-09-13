@@ -19,6 +19,30 @@ export interface FixturePage {
 export interface FixtureFeatures {
   bookmarks?: boolean;
   formTextField?: boolean;
+  /** The text field's starting /V value. */
+  formPrefilledText?: string;
+  /** Text field marked read-only (/Ff 1). */
+  formReadOnly?: boolean;
+  /** Text field with /MaxLen 5. */
+  formMaxLen?: boolean;
+  /** Text field carrying a /TU tooltip. */
+  formTooltip?: string;
+  /** Text field with the password flag. */
+  formPassword?: boolean;
+  /** The text field's widget is flagged hidden+no-view. */
+  formHiddenWidget?: boolean;
+  /** The text field carries /AA format/validate/calculate scripts and a /A SubmitForm action. */
+  formFieldScripts?: boolean;
+  /** /Btn checkbox with on-state "Ja" (non-standard name) and its own appearances. */
+  formCheckbox?: boolean;
+  /** /Btn radio group with two widgets (pages 1 and 2 when present), states A/B/Off. */
+  formRadio?: boolean;
+  /** /Ch combobox with three options. */
+  formChoice?: boolean;
+  /** Text field owning one widget per page. */
+  formSpanPages?: boolean;
+  /** Terminal field and widget merged into one dictionary (no /Parent). */
+  formMergedField?: boolean;
   signatureField?: boolean;
   pageLabels?: boolean;
   tags?: boolean;
@@ -79,6 +103,12 @@ export function buildTestPdf(pages: FixturePage[], features: FixtureFeatures = {
 
   const catalogExtras: string[] = [];
   const pageExtras = new Map<number, string[]>();
+  const pageAnnots = new Map<number, number[]>();
+  const addPageAnnot = (pageIndex: number, annotId: number): void => {
+    const list = pageAnnots.get(pageIndex) ?? [];
+    list.push(annotId);
+    pageAnnots.set(pageIndex, list);
+  };
   const extra = (text: string): number => {
     const id = nextId++;
     bodies.set(id, text);
@@ -112,9 +142,7 @@ export function buildTestPdf(pages: FixturePage[], features: FixtureFeatures = {
   if (features.remoteLinkAction) {
     const uri = extra("<< /S /URI /URI (https://example.invalid/remote) >>");
     const link = extra(`<< /Type /Annot /Subtype /Link /Rect [10 10 60 30] /A ${uri} 0 R >>`);
-    const list = pageExtras.get(0) ?? [];
-    list.push(`/Annots [${link} 0 R]`);
-    pageExtras.set(0, list);
+    addPageAnnot(0, link);
   }
   if (features.chainedLaunchAction) {
     const launch = extra("<< /S /Launch /Win << /P (fixture) >> >>");
@@ -133,9 +161,7 @@ export function buildTestPdf(pages: FixturePage[], features: FixtureFeatures = {
     const annot = extra(
       `<< /Type /Annot /Subtype /RichMedia /Rect [0 0 10 10] /RichMediaContent ${richContent} 0 R >>`
     );
-    const list = pageExtras.get(0) ?? [];
-    list.push(`/Annots [${annot} 0 R]`);
-    pageExtras.set(0, list);
+    addPageAnnot(0, annot);
   }
   if (features.embeddedFiles) {
     const streamText = "fixture-attachment";
@@ -165,21 +191,33 @@ export function buildTestPdf(pages: FixturePage[], features: FixtureFeatures = {
     features.signatureField ||
     features.emptySignatureField ||
     features.xfaStatic ||
-    features.xfaStaticWithDatasets;
+    features.xfaStaticWithDatasets ||
+    features.formCheckbox ||
+    features.formRadio ||
+    features.formChoice ||
+    features.formSpanPages ||
+    features.formMergedField;
   if (wantsFields || features.xfaDynamic) {
     const form = nextId++;
     const fieldIds: number[] = [];
-    const widgetIds: number[] = [];
     const formExtras: string[] = [];
-    const addField = (body: (widget: number) => string, widgetExtras: string[] = []): void => {
+    const apStream = (ops: string): number =>
+      extra(
+        `<< /Type /XObject /Subtype /Form /BBox [0 0 15 15] /Resources << >> /Length ${ops.length} >>\nstream\n${ops}\nendstream`
+      );
+    const addField = (
+      body: (widget: number) => string,
+      widgetExtras: string[] = [],
+      pageIndex = 0,
+    ): void => {
       const widget = nextId++;
       const field = nextId++;
       fieldIds.push(field);
-      widgetIds.push(widget);
+      addPageAnnot(pageIndex, widget);
       bodies.set(field, body(widget));
       bodies.set(
         widget,
-        `<< /Type /Annot /Subtype /Widget /Rect [100 100 200 120] /P ${pageIds[0]} 0 R /Parent ${field} 0 R${widgetExtras.length ? ` ${widgetExtras.join(" ")}` : ""} >>`
+        `<< /Type /Annot /Subtype /Widget /Rect [100 100 200 120] /P ${pageIds[pageIndex]} 0 R /Parent ${field} 0 R${widgetExtras.length ? ` ${widgetExtras.join(" ")}` : ""} >>`
       );
     };
     if (features.formTextField || features.xfaStatic || features.xfaStaticWithDatasets) {
@@ -198,7 +236,91 @@ export function buildTestPdf(pages: FixturePage[], features: FixtureFeatures = {
         catalogExtras.push(`/OpenAction ${shared} 0 R`);
         widgetExtras.push(`/A ${shared} 0 R`);
       }
-      addField((widget) => `<< /FT /Tx /T (fixture-name) /V () /Kids [${widget} 0 R] >>`, widgetExtras);
+      if (features.formHiddenWidget) widgetExtras.push("/F 34");
+      const fieldExtras: string[] = [];
+      const fieldFlags = (features.formReadOnly ? 1 : 0) | (features.formPassword ? 8192 : 0);
+      if (fieldFlags !== 0) fieldExtras.push(`/Ff ${fieldFlags}`);
+      if (features.formMaxLen) fieldExtras.push("/MaxLen 5");
+      if (features.formTooltip) {
+        fieldExtras.push(`/TU (${escapePdfText(features.formTooltip)})`);
+      }
+      if (features.formFieldScripts) {
+        const fmt = extra("<< /S /JavaScript /JS (fixture-format) >>");
+        const val = extra("<< /S /JavaScript /JS (fixture-validate) >>");
+        const calc = extra("<< /S /JavaScript /JS (fixture-calc) >>");
+        const submit = extra("<< /S /SubmitForm /F (https://localhost/fixture) >>");
+        fieldExtras.push(`/AA << /F ${fmt} 0 R /V ${val} 0 R /C ${calc} 0 R >> /A ${submit} 0 R`);
+      }
+      const value =
+        features.formPrefilledText !== undefined ? escapePdfText(features.formPrefilledText) : "";
+      addField(
+        (widget) =>
+          `<< /FT /Tx /T (fixture-name) /V (${value}) /Kids [${widget} 0 R]${fieldExtras.length ? ` ${fieldExtras.join(" ")}` : ""} >>`,
+        widgetExtras,
+      );
+    }
+    if (features.formCheckbox) {
+      const on = apStream("3 4 m 7 1 l 13 12 l S");
+      const off = apStream("q Q");
+      addField(
+        (widget) => `<< /FT /Btn /T (fixture-check) /V /Off /Kids [${widget} 0 R] >>`,
+        [`/AS /Off`, `/AP << /N << /Ja ${on} 0 R /Off ${off} 0 R >> >>`],
+      );
+    }
+    if (features.formRadio) {
+      const apA = apStream("4 4 m 11 4 l 7 11 l h S");
+      const apB = apStream("7 7 3 0 0 360 arc S");
+      const apOff = apStream("q Q");
+      const w1 = nextId++;
+      const w2 = nextId++;
+      const field = nextId++;
+      fieldIds.push(field);
+      bodies.set(
+        field,
+        `<< /FT /Btn /T (fixture-radio) /V /B /Kids [${w1} 0 R ${w2} 0 R] /Ff 49152 >>`
+      );
+      const secondPage = Math.min(1, pageIds.length - 1);
+      bodies.set(
+        w1,
+        `<< /Type /Annot /Subtype /Widget /Rect [100 200 115 215] /P ${pageIds[0]} 0 R /Parent ${field} 0 R /AS /Off /AP << /N << /A ${apA} 0 R /Off ${apOff} 0 R >> >> >>`
+      );
+      bodies.set(
+        w2,
+        `<< /Type /Annot /Subtype /Widget /Rect [120 200 135 215] /P ${pageIds[secondPage]} 0 R /Parent ${field} 0 R /AS /B /AP << /N << /B ${apB} 0 R /Off ${apOff} 0 R >> >> >>`
+      );
+      addPageAnnot(0, w1);
+      addPageAnnot(secondPage, w2);
+    }
+    if (features.formChoice) {
+      addField(
+        (widget) =>
+          `<< /FT /Ch /T (fixture-choice) /Opt [(alpha) (beta) (gamma)] /V (alpha) /Ff 131072 /Kids [${widget} 0 R] >>`
+      );
+    }
+    if (features.formSpanPages) {
+      const field = nextId++;
+      const ids = pageIds.map(() => nextId++);
+      fieldIds.push(field);
+      bodies.set(
+        field,
+        `<< /FT /Tx /T (fixture-span) /V () /Kids [${ids.map((id) => `${id} 0 R`).join(" ")}] >>`
+      );
+      ids.forEach((id, index) => {
+        bodies.set(
+          id,
+          `<< /Type /Annot /Subtype /Widget /Rect [100 300 200 320] /P ${pageIds[index]} 0 R /Parent ${field} 0 R >>`
+        );
+        addPageAnnot(index, id);
+      });
+    }
+    if (features.formMergedField) {
+      const merged = nextId++;
+      fieldIds.push(merged);
+      bodies.set(
+        merged,
+        `<< /Type /Annot /Subtype /Widget /Rect [100 400 200 420] /P ${pageIds[0]} 0 R /FT /Tx /T (fixture-merged) /V () /F 4 >>`
+      );
+      addPageAnnot(0, merged);
     }
     if (features.signatureField) {
       addField((widget) => {
@@ -236,11 +358,6 @@ export function buildTestPdf(pages: FixturePage[], features: FixtureFeatures = {
       `<<${fieldIds.length ? ` /Fields [${fieldIds.map((id) => `${id} 0 R`).join(" ")}]` : ""}${formExtras.length ? ` ${formExtras.join(" ")}` : ""} >>`
     );
     catalogExtras.push(`/AcroForm ${form} 0 R`);
-    if (widgetIds.length > 0) {
-      const list = pageExtras.get(0) ?? [];
-      list.push(`/Annots [${widgetIds.map((id) => `${id} 0 R`).join(" ")}]`);
-      pageExtras.set(0, list);
-    }
   }
   if (features.usageRights || features.docMdpSignature) {
     const permsEntries: string[] = [];
@@ -275,9 +392,7 @@ export function buildTestPdf(pages: FixturePage[], features: FixtureFeatures = {
     );
     bodies.set(form, `<< /Fields [${parent} 0 R] >>`);
     catalogExtras.push(`/AcroForm ${form} 0 R`);
-    const list = pageExtras.get(0) ?? [];
-    list.push(`/Annots [${widget} 0 R]`);
-    pageExtras.set(0, list);
+    addPageAnnot(0, widget);
   }
   if (features.pageLabels) {
     catalogExtras.push("/PageLabels << /Nums [0 << /S /D /P (A-) >>] >>");
@@ -294,7 +409,11 @@ export function buildTestPdf(pages: FixturePage[], features: FixtureFeatures = {
   );
   pages.forEach((page, index) => {
     const width = page.width ?? 600 + index;
-    const extras = pageExtras.get(index) ?? [];
+    const extras = [...(pageExtras.get(index) ?? [])];
+    const annots = pageAnnots.get(index);
+    if (annots && annots.length > 0) {
+      extras.push(`/Annots [${annots.map((id) => `${id} 0 R`).join(" ")}]`);
+    }
     bodies.set(
       pageIds[index],
       `<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${width} 792] /Contents ${contentIds[index]} 0 R /Resources << /Font << /F1 ${fontId} 0 R >> >>${extras.length ? ` ${extras.join(" ")}` : ""} >>`

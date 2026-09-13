@@ -134,10 +134,42 @@ export async function getGhostscriptVersion(options: NativeCallOptions = {}): Pr
   return version;
 }
 
-interface QpdfJson {
-  pages?: Array<{ object?: string }>;
+/** One widget row in `qpdf --json` acroform.fields. */
+export interface QpdfFieldAnnotation {
+  object?: string;
+  appearancestate?: string;
+  annotationflags?: number;
+  rect?: number[];
+}
+
+/** One acroform field entry as qpdf reports it: one row per widget. */
+export interface QpdfAcroformField {
+  object?: string;
+  annotation?: QpdfFieldAnnotation;
+  parent?: string | null;
+  fullname?: string;
+  alternativename?: string;
+  partialname?: string;
+  value?: unknown;
+  fieldtype?: string;
+  fieldflags?: number;
+  ischeckbox?: boolean;
+  isradiobutton?: boolean;
+  ischoice?: boolean;
+  istext?: boolean;
+  choices?: string[];
+  pageposfrom1?: number;
+}
+
+export interface QpdfJsonPage {
+  object?: string;
+  contents?: unknown;
+}
+
+export interface QpdfJson {
+  pages?: QpdfJsonPage[];
   outlines?: unknown[];
-  acroform?: { hasacroform?: boolean; needappearances?: boolean; fields?: unknown[] };
+  acroform?: { hasacroform?: boolean; needappearances?: boolean; fields?: QpdfAcroformField[] };
   attachments?: Record<string, unknown>;
   encrypt?: { encrypted?: boolean };
   pagelabels?: unknown[];
@@ -242,9 +274,15 @@ interface WalkContext {
   action: boolean;
   /** True when this node is an additional-actions map whose values are actions. */
   aaMap: boolean;
+  /**
+   * True inside an /AP appearance dictionary: its keys are appearance-state
+   * names — arbitrary strings like "/A" that must not be read as action
+   * edges — and its values are appearance streams, never actions.
+   */
+  appearance: boolean;
 }
 
-const PLAIN: Omit<WalkContext, "walk"> = { action: false, aaMap: false };
+const PLAIN: Omit<WalkContext, "walk"> = { action: false, aaMap: false, appearance: false };
 
 interface ClassificationWalk {
   objects: Record<string, unknown>;
@@ -319,7 +357,7 @@ function traverseActionTarget(
   tick(walk);
   if (typeof value === "string") {
     if (OBJECT_REF.test(value)) {
-      visitObject(value, walk, { walk: name, action: true, aaMap: false });
+      visitObject(value, walk, { walk: name, action: true, aaMap: false, appearance: false });
     } else {
       recordFinding(walk, name, objKey, "action");
     }
@@ -336,7 +374,7 @@ function traverseActionTarget(
     return;
   }
   if (isDict(value)) {
-    traverseDict(value, walk, { walk: name, action: true, aaMap: false }, objKey);
+    traverseDict(value, walk, { walk: name, action: true, aaMap: false, appearance: false }, objKey);
     return;
   }
   recordFinding(walk, name, objKey, "action");
@@ -397,7 +435,7 @@ function traverseAdditionalActions(
     return;
   }
   if (typeof value === "string" && OBJECT_REF.test(value)) {
-    visitObject(value, walk, { walk: name, action: false, aaMap: true });
+    visitObject(value, walk, { walk: name, action: false, aaMap: true, appearance: false });
     return;
   }
   traverseNode(value, walk, { walk: name, ...PLAIN }, objKey);
@@ -409,6 +447,12 @@ function traverseDict(
   ctx: WalkContext,
   objKey: string
 ): void {
+  if (ctx.appearance) {
+    for (const value of Object.values(dict)) {
+      traverseNode(value, walk, { walk: ctx.walk, ...PLAIN, appearance: true }, objKey);
+    }
+    return;
+  }
   if (ctx.aaMap) {
     for (const value of Object.values(dict)) {
       traverseActionTarget(value, walk, ctx.walk, objKey, false);
@@ -439,6 +483,10 @@ function traverseDict(
     }
     if (key === "/AA") {
       traverseAdditionalActions(value, walk, ctx.walk, objKey);
+      continue;
+    }
+    if (key === "/AP") {
+      traverseNode(value, walk, { walk: ctx.walk, ...PLAIN, appearance: true }, objKey);
       continue;
     }
     if (ACTION_EDGE_KEYS.has(key)) {
@@ -513,6 +561,10 @@ export function classifyQpdfJson(raw: QpdfJson): {
   needsRendering: boolean;
   activeContent: ActiveContentFinding[];
   compatWarnings: CompatWarningKind[];
+  /** Object references ("N G R") the catalog walk reached. */
+  catalogReachable: Set<string>;
+  /** Object references the field walk reached, including field-bound actions. */
+  fieldReachable: Set<string>;
 } {
   const objects = raw.qpdf?.[1];
   if (raw.qpdf?.[0]?.jsonversion !== QPDF_JSON_VERSION || !isDict(objects)) {
@@ -611,7 +663,9 @@ export function classifyQpdfJson(raw: QpdfJson): {
     usageRights,
     needsRendering,
     activeContent: [...walk.findings.values()],
-    compatWarnings
+    compatWarnings,
+    catalogReachable: new Set([...walk.visited.catalog].map((key) => key.slice(4))),
+    fieldReachable: new Set([...walk.visited.field].map((key) => key.slice(4)))
   };
 }
 
@@ -639,18 +693,17 @@ async function probeIsEncrypted(
 }
 
 /**
- * Read-only inspection of one source PDF via `qpdf --json`.
- * Exit code 3 (warnings) still yields an inspection plus warnings; qpdf
- * warnings that prevent complete inspection are fatal.
+ * Run `qpdf --json` against one PDF and return the parsed document with any
+ * warnings. Exit code 3 still yields usable output; qpdf warnings that
+ * prevent complete inspection are fatal. Used both for admission
+ * inspection and for the mid-pipeline reads (candidate, final artifact)
+ * where the object map drives action removal and readback.
  */
-export async function inspectPdfSource(
+export async function readQpdfJson(
   sourcePath: string,
   options: NativeCallOptions = {}
-): Promise<PdfInspection> {
+): Promise<{ raw: QpdfJson; warnings: string[] }> {
   const run = options.run ?? defaultNativeRunner;
-  const qpdfVersion = await getQpdfVersion(options);
-  assertNativeFloor("qpdf", qpdfVersion, QPDF_SECURITY_FLOOR);
-
   let result: ProcessResult;
   try {
     result = await run("qpdf", ["--json", "--", sourcePath], childOptions(options, { allowedExitCodes: [0, 3] }));
@@ -690,11 +743,27 @@ export async function inspectPdfSource(
       { inputPath: sourcePath }
     );
   }
+  return { raw: parsed, warnings: result.stderr ? [result.stderr] : [] };
+}
+
+/**
+ * Read-only inspection of one source PDF via `qpdf --json`.
+ * Exit code 3 (warnings) still yields an inspection plus warnings; qpdf
+ * warnings that prevent complete inspection are fatal.
+ */
+export async function inspectPdfSource(
+  sourcePath: string,
+  options: NativeCallOptions = {}
+): Promise<PdfInspection> {
+  const qpdfVersion = await getQpdfVersion(options);
+  assertNativeFloor("qpdf", qpdfVersion, QPDF_SECURITY_FLOOR);
+
+  const { raw: parsed, warnings } = await readQpdfJson(sourcePath, options);
   const classified = classifyQpdfJson(parsed);
   const { signed, xfa, usageRights, needsRendering, activeContent, compatWarnings } = classified;
   return {
     path: sourcePath,
-    pageCount: parsed.pages.length,
+    pageCount: parsed.pages?.length ?? 0,
     pdfVersion: parsed.qpdf?.[0]?.pdfversion ?? "unknown",
     qpdfVersion,
     // Reported, not refused here: the streaming scan refuses encrypted input
@@ -707,7 +776,7 @@ export async function inspectPdfSource(
     needsRendering,
     activeContent,
     compatWarnings,
-    warnings: result.stderr ? [result.stderr] : []
+    warnings
   };
 }
 
@@ -800,6 +869,177 @@ export async function admitFillSource(
     await unlink(workingPath).catch(() => undefined);
     throw error;
   }
+}
+
+/** Dictionary keys that carry actions the fill output stage removes (R15). */
+const ACTION_REMOVAL_KEYS = new Set(["/AA", "/A", "/OpenAction", "/OnActivation"]);
+
+/**
+ * Collect every object reference reachable from the given values through
+ * the object map. `skipActionEdges` keeps field structure reachable while
+ * ignoring the action edges the removal stage deletes, so shared objects
+ * named by an action (a /ResetForm field list, a catalog-reachable
+ * destination) are never deleted with the action they sit beside.
+ */
+function collectReachableRefs(
+  roots: readonly unknown[],
+  objects: Record<string, unknown>,
+  skipActionEdges: boolean
+): Set<string> {
+  const seen = new Set<string>();
+  const stack: unknown[] = [...roots];
+  let nodes = 0;
+  while (stack.length > 0) {
+    const node = stack.pop();
+    nodes += 1;
+    if (nodes > CLASSIFIER_NODE_BUDGET) {
+      throw incomplete("field-action removal exceeded the traversal node budget");
+    }
+    if (typeof node === "string") {
+      if (OBJECT_REF.test(node) && !seen.has(node)) {
+        seen.add(node);
+        const entry = objects[`obj:${node}`];
+        if (entry !== undefined) stack.push(objectNode(entry));
+      }
+      continue;
+    }
+    if (Array.isArray(node)) {
+      stack.push(...node);
+      continue;
+    }
+    if (isDict(node)) {
+      const subtype = node["/S"];
+      const isAction = typeof subtype === "string" && KNOWN_ACTION_SUBTYPES.has(subtype);
+      for (const [key, value] of Object.entries(node)) {
+        if (skipActionEdges && ACTION_REMOVAL_KEYS.has(key)) continue;
+        if (skipActionEdges && isAction && key === "/Next") continue;
+        stack.push(value);
+      }
+    }
+  }
+  return seen;
+}
+
+export interface FieldActionUpdate {
+  /**
+   * qpdf --update-from-json object map: dictionaries rewritten without
+   * their action keys as `{ "value": <dict> }`, orphaned action objects
+   * deleted as `{ "value": null }`. Empty when nothing needs removal.
+   */
+  objects: Record<string, { value: unknown }>;
+  pdfVersion: string;
+}
+
+/**
+ * Compute the update that removes every field-bound action from one
+ * inspected document (R15): each field-tree dictionary loses its action
+ * edge keys, and every object reachable only through those edges is
+ * deleted. Objects reachable through non-action edges — shared
+ * destinations, a /ResetForm field list — are kept, and anything missed
+ * fails closed in the strict output gate rather than publishing.
+ */
+export function planFieldActionRemoval(raw: QpdfJson): FieldActionUpdate {
+  const objects = raw.qpdf?.[1];
+  if (raw.qpdf?.[0]?.jsonversion !== QPDF_JSON_VERSION || !isDict(objects)) {
+    throw incomplete("unsupported or missing qpdf JSON object map");
+  }
+  const classified = classifyQpdfJson(raw);
+  const trailer = objectNode(objects["trailer"]);
+  const rootRef = isDict(trailer) ? trailer["/Root"] : undefined;
+  const catalog = typeof rootRef === "string" ? objectNode(objects[`obj:${rootRef}`]) : undefined;
+  const acroRef = isDict(catalog) ? catalog["/AcroForm"] : undefined;
+  const stripCandidates = new Set(classified.fieldReachable);
+  if (typeof acroRef === "string" && OBJECT_REF.test(acroRef)) stripCandidates.add(acroRef);
+
+  // Objects reachable through field structure (never action edges) are kept
+  // even when an action subgraph also references them.
+  const keep = new Set([
+    ...classified.catalogReachable,
+    ...collectReachableRefs(fieldRoots(raw, objects), objects, true)
+  ]);
+
+  const updates: Record<string, { value: unknown }> = {};
+  const strippedValues: unknown[] = [];
+  for (const ref of stripCandidates) {
+    const entry = objects[`obj:${ref}`];
+    if (!isDict(entry) || !isDict(entry["value"])) continue;
+    const dict = entry["value"];
+    const dropped = Object.keys(dict).filter((key) => ACTION_REMOVAL_KEYS.has(key));
+    if (dropped.length === 0) continue;
+    const cleaned = { ...dict };
+    for (const key of dropped) {
+      strippedValues.push(cleaned[key]);
+      delete cleaned[key];
+    }
+    updates[`obj:${ref}`] = { value: cleaned };
+  }
+  const actionGraph = collectReachableRefs(strippedValues, objects, false);
+  for (const ref of actionGraph) {
+    if (keep.has(ref) || stripCandidates.has(ref)) continue;
+    updates[`obj:${ref}`] = { value: null };
+  }
+  return { objects: updates, pdfVersion: raw.qpdf[0].pdfversion ?? "1.7" };
+}
+
+/** Serialise a removal plan into the `qpdf --update-from-json` file shape. */
+export function serializeFieldActionUpdate(update: FieldActionUpdate): string {
+  return JSON.stringify({
+    qpdf: [{ jsonversion: QPDF_JSON_VERSION, pdfversion: update.pdfVersion }, update.objects]
+  });
+}
+
+export interface FillOutputStage {
+  inputPath: string;
+  outputPath: string;
+  /** Pre-written field-action update file; omitted when there is nothing to remove. */
+  updateJsonPath?: string;
+  /** Regenerate field appearances before validation or flattening (KTD9). */
+  generateAppearances?: boolean;
+  /** Burn all annotations into page content (KTD9). */
+  flatten?: boolean;
+}
+
+/**
+ * One qpdf pass over the fill candidate: field-action removal, appearance
+ * regeneration and the unconditional revision-collapsing rewrite (KTD3),
+ * plus flattening when the plan burns values in. The rewrite drops every
+ * superseded object the incremental save appended, so no earlier revision's
+ * bytes survive. Object streams are deliberately not generated: packing
+ * renumbers objects, and the field identifiers of KTD5 must stay stable
+ * between the inventoried source and the delivered file.
+ */
+export async function runFillOutputStage(
+  stage: FillOutputStage,
+  options: NativeCallOptions = {}
+): Promise<string[]> {
+  const run = options.run ?? defaultNativeRunner;
+  const args: string[] = [];
+  if (stage.updateJsonPath) args.push(`--update-from-json=${stage.updateJsonPath}`);
+  if (stage.generateAppearances) args.push("--generate-appearances");
+  if (stage.flatten) args.push("--flatten-annotations=all");
+  args.push(
+    "--compress-streams=y",
+    "--recompress-flate",
+    "--",
+    stage.inputPath,
+    stage.outputPath
+  );
+  const result = await run("qpdf", args, childOptions(options, { allowedExitCodes: [0, 3] }));
+  return result.stderr ? [result.stderr] : [];
+}
+
+/** Decompressed object-map text of one PDF, for content-level readback. */
+export async function writeQdfDump(
+  sourcePath: string,
+  dumpPath: string,
+  options: NativeCallOptions = {}
+): Promise<void> {
+  const run = options.run ?? defaultNativeRunner;
+  await run(
+    "qpdf",
+    ["--qdf", "--object-streams=disable", "--", sourcePath, dumpPath],
+    childOptions(options, { allowedExitCodes: [0, 3] })
+  );
 }
 
 export interface PageGroup {

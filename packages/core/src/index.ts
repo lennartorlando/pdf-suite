@@ -72,3 +72,14 @@ export {
   type FillAdmission
 } from "./engines/qpdf-pages.js";
 export { ghostscriptArgs } from "./engines/ghostscript.js";
+export {
+  fillForm,
+  inventoryFormFields,
+  FILL_MAX_SOURCE_BYTES,
+  FILL_MAX_OUTPUT_BYTES,
+  FILL_MAX_PLAN_BYTES,
+  type FillFormOptions,
+  type FillSummary,
+  type InspectFormOptions,
+  type FormInventoryResult
+} from "./forms.js";
