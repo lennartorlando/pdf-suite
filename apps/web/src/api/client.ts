@@ -1,6 +1,8 @@
 import type { CompressionProfileName } from "../profiles.js";
 import type { PageManifest } from "@pdf-compressor/core/page-manifest";
 import type { OcrLanguage, OcrMetadata, OcrOptions } from "@pdf-compressor/core/ocr-contract";
+import type { FormInventory } from "@pdf-compressor/core/form-inventory";
+import { serializeFormPlan, type FormPlan } from "@pdf-compressor/core/form-plan";
 
 export type { OcrLanguage, OcrMetadata } from "@pdf-compressor/core/ocr-contract";
 
@@ -209,4 +211,87 @@ export async function downloadOutput(downloadPath: string, signal?: AbortSignal)
 /** Explicitly discard a retained output without downloading it. */
 export async function discardOutput(handle: string, signal?: AbortSignal): Promise<void> {
   await authedFetch(`/api/outputs/${encodeURIComponent(handle)}`, { method: "DELETE", signal });
+}
+
+export interface FormInventoryResponse {
+  ok: boolean;
+  inventory?: FormInventory;
+  pageCount?: number;
+  warnings?: string[];
+  removedRestrictions?: string[];
+  removedUsageRights?: boolean;
+  code?: string;
+  message?: string;
+}
+
+/** Server-authoritative field inventory (KTD6), with current values revealed. */
+export async function inventoryForm(file: File, signal?: AbortSignal): Promise<FormInventoryResponse> {
+  const form = new FormData();
+  form.append("source", file, "source.pdf");
+  const response = await authedFetch("/api/forms/inventory?reveal=values", {
+    method: "POST",
+    body: form,
+    signal
+  });
+  return response.json() as Promise<FormInventoryResponse>;
+}
+
+export interface FillFormResult {
+  ok: boolean;
+  handle?: string;
+  downloadUrl?: string;
+  pageCount?: number;
+  outputBytes?: number;
+  burnedIn?: boolean;
+  fieldsWritten?: number;
+  placementsWritten?: number;
+  computedFields?: number;
+  removedRestrictions?: string[];
+  removedUsageRights?: boolean;
+  sourceHash?: string;
+  warnings?: string[];
+  compatWarnings?: string[];
+  code?: string;
+  message?: string;
+}
+
+/**
+ * Busy-retry delays for a native-slot 429. The slot is released when the
+ * in-flight job settles, so short bounded waits are enough; the plan's nonce
+ * makes a retried upload idempotent (KTD18), and the same FormData replays
+ * the authentication retry inside `authedFetch` for free.
+ */
+const FILL_BUSY_DELAYS_MS = [400, 1200];
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** One source plus one serialized plan; the server produces the output. */
+export async function fillForm(file: File, plan: FormPlan, signal?: AbortSignal): Promise<FillFormResult> {
+  const form = new FormData();
+  // Plain string field: a Blob would parse as a file part and be refused.
+  form.append("plan", serializeFormPlan(plan));
+  form.append("source", file, "source.pdf");
+  for (let attempt = 0; ; attempt += 1) {
+    const response = await authedFetch("/api/forms/fill", { method: "POST", body: form, signal });
+    if (response.status !== 429 || attempt >= FILL_BUSY_DELAYS_MS.length) {
+      return response.json() as Promise<FillFormResult>;
+    }
+    await sleep(FILL_BUSY_DELAYS_MS[attempt], signal);
+  }
 }

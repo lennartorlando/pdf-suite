@@ -60,6 +60,17 @@ export function assetPath(file) {
   return join(ASSETS, file);
 }
 
+/** All emitted asset paths relative to ASSETS, recursing into pdf.js dirs. */
+function listAssets(dir = ASSETS, prefix = "") {
+  const out = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) out.push(...listAssets(join(dir, entry.name), rel));
+    else out.push(rel);
+  }
+  return out;
+}
+
 export function gzipBytes(file) {
   return gzipSync(readFileSync(assetPath(file))).length;
 }
@@ -84,7 +95,7 @@ if (invokedDirectly) {
   if (eagerRefs.length === 0) fail("no eager index-*.js asset referenced by dist/index.html.");
   let files;
   try {
-    files = readdirSync(ASSETS);
+    files = listAssets();
   } catch {
     fail("apps/web/dist/assets is missing; run `npm run build` first.");
   }
@@ -93,28 +104,39 @@ if (invokedDirectly) {
   if (missing.length > 0) fail(`eager assets missing from dist: ${missing.join(", ")}.`);
 
   const workerFiles = files.filter((f) => f.startsWith("pdf.worker.min-"));
-  const displayFiles = files.filter((f) => /^pdf-[\w-]+\.js$/.test(f));
+  const displayFiles = files.filter((f) => /^pdf\.min-[\w-]+\.js$/.test(f));
   const editorFiles = files.filter((f) => f.startsWith("PageEditor-") && f.endsWith(".js"));
+  const fillerFiles = files.filter((f) => f.startsWith("FormFiller-") && f.endsWith(".js"));
+  const wasmFiles = files.filter((f) => f.endsWith(".wasm"));
   if (workerFiles.length === 0) fail("no local pdf.worker.min-*.mjs asset in dist (worker must be served locally).");
-  if (displayFiles.length === 0) fail("no lazy pdf-*.js display chunk in dist.");
+  if (displayFiles.length === 0) fail("no lazy pdf.min-*.js display chunk in dist.");
   if (editorFiles.length === 0) fail("no lazy PageEditor-*.js chunk in dist.");
+  if (fillerFiles.length === 0) fail("no lazy FormFiller-*.js chunk in dist.");
+  if (wasmFiles.length === 0) fail("no local pdf.js *.wasm asset in dist (KTD19 requires same-origin wasm).");
 
   const eagerGzip = eagerRefs.reduce((sum, f) => sum + gzipBytes(f), 0);
   const workerGzip = workerFiles.reduce((sum, f) => sum + gzipBytes(f), 0);
   const displayGzip = displayFiles.reduce((sum, f) => sum + gzipBytes(f), 0);
-  const editorGzip = editorFiles.reduce((sum, f) => sum + gzipBytes(f), 0);
 
   // Unrelated assets (CSS) are reported but never counted twice or against JS caps.
   const cssFiles = files.filter((f) => f.endsWith(".css"));
   const cssGzip = cssFiles.reduce((sum, f) => sum + gzipBytes(f), 0);
 
+  // Discovery is inverted: every emitted asset the entry document cannot
+  // reach counts toward the lazy graph by default. That covers lazy JS
+  // chunks, the pdf.js worker, wasm modules and emitted font/icc data, so a
+  // newly added lazy surface cannot evade the budget by going unnamed.
+  const eagerSet = new Set([...eagerRefs, ...cssFiles]);
+  const lazyFiles = files.filter((f) => !eagerSet.has(f));
+  const lazyGraph = lazyFiles.reduce((sum, f) => sum + gzipBytes(f), 0);
+
   const displayPlusWorker = displayGzip + workerGzip;
-  const lazyGraph = editorGzip + displayGzip + workerGzip;
 
   console.log("check-editor-bundle (gzip bytes from built Vite asset graph):");
   console.log(`  eager shell (${eagerRefs.join(", ")}): ${eagerGzip} (baseline ${EAGER_BASELINE_GZIP}, growth budget ${EAGER_GROWTH_BUDGET})`);
   console.log(`  display + worker: ${displayPlusWorker} (cap ${DISPLAY_PLUS_WORKER_CAP})`);
-  console.log(`  lazy editor graph: ${lazyGraph} (cap ${LAZY_GRAPH_CAP})`);
+  console.log(`  lazy graph (${lazyFiles.length} assets): ${lazyGraph} (cap ${LAZY_GRAPH_CAP})`);
+  for (const f of lazyFiles) console.log(`    ${f}: ${gzipBytes(f)}`);
   console.log(`  css (informational, not counted): ${cssGzip}`);
 
   const gate = evaluateBundleGate({ eagerGzip, displayPlusWorker, lazyGraph });
@@ -131,15 +153,11 @@ if (invokedDirectly) {
     console.error(`  SC2 violated: lazy editor graph is ${lazyGraph} bytes gzip (cap ${LAZY_GRAPH_CAP}).`);
     failed = true;
   }
-  // Eager/HTML hygiene: the compressor shell must not eagerly load PDF.js.
-  if (/pdf\.worker|PageEditor|pdf-[\w-]+\.js/.test(html)) {
-    console.error("  SC1 violated: dist/index.html eagerly references editor/PDF.js assets.");
-    failed = true;
-  }
-  try {
-    const stat = statSync(ASSETS);
-    void stat;
-  } catch {
+  // Eager/HTML hygiene: the compressor shell must not eagerly reference any
+  // lazy asset (editor, filler, PDF.js, wasm, fonts).
+  const leaked = lazyFiles.filter((f) => html.includes(f));
+  if (leaked.length > 0) {
+    console.error(`  SC1 violated: dist/index.html eagerly references lazy assets: ${leaked.join(", ")}.`);
     failed = true;
   }
 

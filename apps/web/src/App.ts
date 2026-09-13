@@ -5,10 +5,11 @@ import { createProfileSelector } from "./components/ProfileSelector.js";
 import { createResultSummary, renderError, renderResult } from "./components/ResultSummary.js";
 import type { CompressionProfileName } from "./profiles.js";
 
-// NOTE: the page editor and PDF.js stay behind a dynamic import so the
-// compressor shell never eagerly loads them (SC1). Do not add a static
-// import of the editor or pdfjs-dist here.
+// NOTE: the page editor, the fill surface and PDF.js stay behind a dynamic
+// import so the compressor shell never eagerly loads them (SC1). Do not add
+// a static import of the editor, the filler or pdfjs-dist here.
 type PageEditorModule = typeof import("./components/PageEditor.js");
+type FormFillerModule = typeof import("./components/FormFiller.js");
 
 export function mountApp(root: HTMLElement): void {
   mountCompressor(root);
@@ -59,6 +60,16 @@ function mountCompressor(root: HTMLElement): void {
     currentController?.abort();
     revokeCompressUrl();
     void mountEditor(root);
+  });
+
+  const fillButton = document.createElement("button");
+  fillButton.className = "button button--secondary";
+  fillButton.textContent = "Fill and sign";
+  fillButton.addEventListener("click", () => {
+    mounted = false;
+    currentController?.abort();
+    revokeCompressUrl();
+    void mountFormFiller(root);
   });
 
   const dropzone = createFileDropzone((file) => {
@@ -119,7 +130,7 @@ function mountCompressor(root: HTMLElement): void {
 
   const actions = document.createElement("div");
   actions.className = "actions";
-  actions.append(button, cancelButton, editorButton);
+  actions.append(button, cancelButton, editorButton, fillButton);
 
   root.replaceChildren(title, subtitle, dropzone, profiles, actions, progress, result);
 }
@@ -153,6 +164,45 @@ async function mountEditor(root: HTMLElement): Promise<void> {
     root.replaceChildren(editor.element);
   } catch {
     renderError(root, "The page editor could not be opened. Go back and try again.");
+    const back = document.createElement("button");
+    back.className = "button button--secondary";
+    back.textContent = "Back to compressor";
+    back.addEventListener("click", () => mountCompressor(root));
+    root.append(back);
+  }
+}
+
+async function mountFormFiller(root: HTMLElement): Promise<void> {
+  const loading = document.createElement("p");
+  loading.className = "progress";
+  loading.setAttribute("role", "status");
+  loading.textContent = "Opening the form filler...";
+  root.replaceChildren(loading);
+  try {
+    const module: FormFillerModule = await import("./components/FormFiller.js");
+    if (!root.contains(loading)) return;
+    // Same live-handle discipline as the page editor: the filler owns a
+    // document, a page canvas, object URLs and window listeners that must be
+    // released before the compressor DOM replaces it.
+    let liveFiller: ReturnType<FormFillerModule["createFormFiller"]> | undefined;
+    const handleExit = (): void => {
+      const live = liveFiller;
+      liveFiller = undefined;
+      try {
+        live?.destroy();
+      } finally {
+        root.classList.remove("app--fill");
+        mountCompressor(root);
+      }
+    };
+    const filler = module.createFormFiller({ onExit: handleExit });
+    liveFiller = filler;
+    // R37: only the fill surface escapes the shell width, via this class.
+    root.classList.add("app--fill");
+    root.replaceChildren(filler.element);
+  } catch {
+    root.classList.remove("app--fill");
+    renderError(root, "The form filler could not be opened. Go back and try again.");
     const back = document.createElement("button");
     back.className = "button button--secondary";
     back.textContent = "Back to compressor";

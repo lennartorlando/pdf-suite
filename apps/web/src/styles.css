@@ -458,6 +458,509 @@ h1 {
   display: none;
 }
 
+/* Fill and sign surface (U6). R37: only this surface escapes the shell
+   width; #app keeps its cap for every other view. */
+
+#app.app--fill {
+  width: calc(100vw - 24px);
+  max-width: 1600px;
+  margin: 0 auto;
+}
+
+.fill-surface {
+  min-height: 100vh;
+}
+
+.fill-bar {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 0;
+  border-bottom: 1px solid #d9deea;
+}
+
+.fill-bar strong {
+  font-size: 17px;
+}
+
+.fill-bar .spacer,
+.fill-leave .spacer,
+.canvas-head .spacer {
+  flex: 1;
+}
+
+.unsaved-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #e6cf8f;
+}
+
+.fill-pick {
+  padding: 28px 0;
+}
+
+.fill-planpick {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  color: #4c5870;
+  font-size: 13px;
+}
+
+/* Docking: the rail keeps 64px, the page column keeps its measured floor of
+   477px, and the side panel docks at 300px. data-layout is set by the
+   surface from the measured thresholds in FormFiller.ts. */
+.fill-workspace {
+  display: grid;
+  grid-template-columns: 64px minmax(477px, 1fr) 300px;
+  gap: 14px;
+  align-items: start;
+  min-height: 70vh;
+}
+
+.fill-workspace[hidden] {
+  display: none;
+}
+
+.fill-surface[data-layout="stacked"] .fill-workspace {
+  grid-template-columns: 64px minmax(0, 1fr);
+}
+
+.fill-surface[data-layout="stacked"] .fill-side,
+.fill-surface[data-layout="stacked"] .fill-navigator {
+  grid-column: 1 / -1;
+}
+
+.fill-surface[data-layout="compact"] .fill-workspace {
+  grid-template-columns: 1fr;
+}
+
+.fill-surface[data-layout="compact"] .fill-tools {
+  grid-auto-flow: column;
+  border-right: 0;
+  border-bottom: 1px solid #d9deea;
+}
+
+.fill-surface[data-layout="compact"] .fill-side,
+.fill-surface[data-layout="compact"] .fill-navigator {
+  grid-column: 1 / -1;
+}
+
+.fill-tools {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding: 12px 6px;
+  background: #ffffff;
+  border-right: 1px solid #d9deea;
+  position: sticky;
+  top: 0;
+}
+
+.tool {
+  display: grid;
+  place-items: center;
+  min-height: 52px;
+  padding: 5px;
+  border: 1px solid #d9deea;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #26324a;
+  font-size: 10px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.tool.active {
+  border-color: #1f7a5c;
+  background: #effaf5;
+  color: #1f7a5c;
+  font-weight: 700;
+}
+
+.tool b {
+  display: block;
+  font-size: 18px;
+}
+
+.fill-stage {
+  padding: 18px 4px;
+}
+
+.canvas-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 700px;
+  margin: 0 auto 10px;
+}
+
+.fill-paper {
+  position: relative;
+  margin: 0 auto;
+  background: #ffffff;
+  border: 1px solid #d9deea;
+  box-shadow: 0 3px 10px #d9deea;
+  overflow: hidden;
+}
+
+.fill-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.hit-layer,
+.overlay-layer,
+.placement-layer {
+  position: absolute;
+  inset: 0;
+}
+
+.field-box {
+  position: absolute;
+  display: flex;
+  padding: 1px;
+  border: 2px solid #1f7a5c;
+  border-radius: 4px;
+  background: rgba(239, 250, 245, 0.85);
+}
+
+.field-box--computed {
+  border-color: #e6cf8f;
+  background: rgba(253, 248, 231, 0.85);
+}
+
+.field-box--marker {
+  border-style: dashed;
+  border-color: #8792a8;
+  background: transparent;
+  color: #65708a;
+  font-size: 10px;
+}
+
+.field-box input,
+.field-box textarea,
+.field-box select {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+.field-box input[type="checkbox"],
+.field-box input[type="radio"] {
+  flex: 0;
+  margin: auto;
+}
+
+.placement {
+  position: absolute;
+  border: 2px solid #1f7a5c;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.9);
+  cursor: move;
+}
+
+.placement--checkmark {
+  display: grid;
+  place-items: center;
+  color: #1f7a5c;
+  font-weight: 700;
+  border: 0;
+  background: transparent;
+  font-size: 18px;
+}
+
+.placement input {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+.placement--selected {
+  outline: 2px solid #1f7a5c;
+  outline-offset: 1px;
+}
+
+.placement-remove {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-height: 26px;
+  padding: 0 9px;
+  border: 1px solid #d9deea;
+  border-radius: 5px;
+  background: #ffffff;
+  color: #a23b3b;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.fill-signature {
+  max-width: 700px;
+  margin: 12px auto 0;
+  padding: 12px;
+  border: 1px solid #d9deea;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.signature-pad__canvas {
+  width: 440px;
+  height: 144px;
+  border: 1px dashed #8792a8;
+  border-radius: 6px;
+  background: #f8fafc;
+  touch-action: none;
+}
+
+.fill-signature__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.fill-notices {
+  max-width: 700px;
+  margin: 0 auto;
+}
+
+.fill-side {
+  padding: 14px;
+  background: #ffffff;
+  border-left: 1px solid #d9deea;
+}
+
+.fill-surface[data-layout="stacked"] .fill-side,
+.fill-surface[data-layout="compact"] .fill-side {
+  border-left: 0;
+  border-top: 1px solid #d9deea;
+}
+
+.fill-side h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+
+.tabs {
+  display: flex;
+  gap: 5px;
+  margin: 12px 0;
+}
+
+.tab {
+  flex: 1;
+  min-height: 34px;
+  border: 1px solid #d9deea;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #4c5870;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tab.active {
+  background: #1f7a5c;
+  color: #ffffff;
+  border-color: #1f7a5c;
+}
+
+.field-list {
+  display: grid;
+  gap: 7px;
+}
+
+.field {
+  padding: 10px;
+  border: 1px solid #d9deea;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.field.active {
+  outline: 2px solid #1f7a5c;
+  outline-offset: 1px;
+}
+
+.field-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.field-top strong {
+  font-size: 14px;
+}
+
+.field-top .tag {
+  margin-left: auto;
+}
+
+.value {
+  margin-top: 7px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: #f5f7fb;
+  font-size: 13px;
+  min-height: 14px;
+}
+
+.value:empty::before {
+  content: "Open";
+  color: #9aa3b5;
+}
+
+.tag--answered,
+.tag.green {
+  background: #effaf5;
+  color: #1f7a5c;
+}
+
+.tag--proposed {
+  background: #eef1f7;
+  color: #1d3a8f;
+}
+
+.tag--skipped {
+  background: transparent;
+  color: #65708a;
+}
+
+.proposal {
+  padding: 10px;
+  border: 1px solid #d9deea;
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+
+.proposal-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.proposal .actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.proposal.rejected {
+  border-left: 4px solid #a23b3b;
+}
+
+.choice {
+  display: block;
+  padding: 9px;
+  border: 1px solid #d9deea;
+  border-radius: 8px;
+  margin-top: 7px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.choice input {
+  margin-right: 7px;
+}
+
+.fill-navigator {
+  grid-column: 2 / 4;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: start;
+  margin: 0 4px 18px;
+  padding: 14px;
+  background: #ffffff;
+  border: 1px solid #d9deea;
+  border-radius: 10px;
+  box-shadow: 0 4px 12px #d9deea;
+}
+
+.fill-navigator[hidden] {
+  display: none;
+}
+
+.fill-navigator h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 7px;
+}
+
+.fill-surface[data-layout="compact"] .field-grid {
+  grid-template-columns: 1fr;
+}
+
+.closekey {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #eef1f7;
+  color: #4c5870;
+  font-size: 11px;
+}
+
+.fill-leave {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 4px 18px;
+  padding: 11px 14px;
+  border: 1px solid #e6cf8f;
+  border-radius: 9px;
+  background: #fdf8e7;
+  color: #5c4a12;
+  font-size: 13px;
+}
+
+.fill-leave[hidden] {
+  display: none;
+}
+
+.opaque {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.button.ghost {
+  border: 1px solid #d9deea;
+  background: #ffffff;
+  color: #26324a;
+}
+
+.button.danger {
+  border: 1px solid #d9deea;
+  background: #ffffff;
+  color: #a23b3b;
+}
+
+.button.tiny {
+  min-height: 30px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
+.button.secondary {
+  color: #26324a;
+  background: #dfe5f0;
+}
+
 @media (max-width: 680px) {
   #app {
     margin-top: 24px;
