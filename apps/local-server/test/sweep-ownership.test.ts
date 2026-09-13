@@ -29,6 +29,9 @@ describe("startup sweep ownership", () => {
       const orphan = join(root, `job-${"b".repeat(32)}`);
       await mkdir(orphan, { recursive: true });
       await writeFile(join(orphan, "stale.pdf"), Buffer.from("stale"));
+      const fillOrphan = join(root, `fill-${"c".repeat(32)}`);
+      await mkdir(fillOrphan, { recursive: true });
+      await writeFile(join(fillOrphan, "stale.pdf"), Buffer.from("stale"));
       const foreign = join(root, "not-a-job");
       await mkdir(foreign, { recursive: true });
       await symlink(join("nowhere"), join(root, "link-job"), "dir").catch(() => undefined);
@@ -36,6 +39,7 @@ describe("startup sweep ownership", () => {
       const manager = await JobManager.create({ tempRoot: root });
       try {
         await expect(stat(orphan)).rejects.toThrow();
+        await expect(stat(fillOrphan)).rejects.toThrow();
         expect((await stat(foreign)).isDirectory()).toBe(true);
         const linkStat = await lstat(join(root, "link-job")).catch(() => null);
         if (linkStat) expect(linkStat.isSymbolicLink()).toBe(true);

@@ -3,7 +3,7 @@ import { chmodSync, Dirent, lstatSync, mkdirSync } from "node:fs";
 import { chmod, lstat, mkdir, readdir, rm, stat, statfs } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { CompressionError } from "@pdf-compressor/core";
+import { CompressionError, FILL_MAX_PLAN_BYTES, FILL_MAX_SOURCE_BYTES } from "@pdf-compressor/core";
 
 /** Initial Safety Limits shared by compression and page export. */
 export const LIMITS = {
@@ -38,7 +38,19 @@ export const LIMITS = {
   /** Free-disk reserve after allocation. */
   minFreeBytes: 1024 * 1024 * 1024,
   /** Download artifact TTL. */
-  outputTtlMs: 10 * 60 * 1000
+  outputTtlMs: 10 * 60 * 1000,
+  /** Bytes per uploaded fill source (Initial Safety Limits). */
+  maxFillSourceBytes: FILL_MAX_SOURCE_BYTES,
+  /** Fill plan field bytes. */
+  maxFillPlanBytes: FILL_MAX_PLAN_BYTES,
+  /** Fill multipart parts: exactly 1 plan field plus 1 source file. */
+  maxFillParts: 2,
+  /** Aggregate fill multipart bytes. */
+  maxFillTotalBytes: FILL_MAX_SOURCE_BYTES + FILL_MAX_PLAN_BYTES,
+  /** Fill output TTL: longer than exports, since re-filling costs typed values. */
+  fillOutputTtlMs: 30 * 60 * 1000,
+  /** Stored fill idempotency records (KTD18). */
+  maxFillRecords: 1024
 } as const;
 
 export interface CapacityCheck {
@@ -61,6 +73,28 @@ export interface RetainedOutput {
 }
 
 export type LeaseOutcome = "leased" | "not_found" | "forbidden" | "expired" | "busy";
+
+export interface FillOutcome {
+  status: number;
+  payload: unknown;
+}
+
+export interface FillIdempotencyRecord {
+  readonly sessionId: string;
+  readonly planDigest: string;
+  readonly sourceDigest: string;
+  /** Present once the nonce's request produced an outcome worth replaying. */
+  outcome?: FillOutcome;
+}
+
+export type FillNonceVerdict =
+  | { kind: "claimed" }
+  /** Same session and bytes, but the earlier attempt produced no outcome. */
+  | { kind: "resume" }
+  | { kind: "replay"; outcome: FillOutcome }
+  | { kind: "foreign" }
+  | { kind: "plan-mismatch" }
+  | { kind: "source-mismatch" };
 
 export interface JobManagerOptions {
   /** Owned app temp root; defaults to a current-user private dir. */
@@ -148,6 +182,7 @@ export class JobManager {
   private nativeInFlight = false;
   private nativeEpoch = 0;
   private readonly retained = new Map<string, RetainedOutput>();
+  private readonly fillRecords = new Map<string, FillIdempotencyRecord>();
   private readonly pendingCleanup = new Set<string>();
   private readonly removeJobDir: (dir: string) => Promise<void>;
   private sweeper: NodeJS.Timeout | undefined;
@@ -223,6 +258,40 @@ export class JobManager {
     return this.nativeInFlight;
   }
 
+  /**
+   * Resolve a plan nonce against its idempotency record (KTD18). The record
+   * is keyed by nonce and bound to the claiming session plus digests of the
+   * exact source and plan bytes: an identical repeat returns the stored
+   * outcome, an interrupted identical attempt resumes, and any other reuse
+   * is rejected instead of being answered from the record. Callers hold the
+   * native slot, so check-and-claim is serial.
+   */
+  resolveFillNonce(
+    nonce: string,
+    claim: { sessionId: string; planDigest: string; sourceDigest: string }
+  ): FillNonceVerdict {
+    const record = this.fillRecords.get(nonce);
+    if (!record) {
+      if (this.fillRecords.size >= LIMITS.maxFillRecords) {
+        const oldest = this.fillRecords.keys().next().value;
+        if (oldest !== undefined) this.fillRecords.delete(oldest);
+      }
+      this.fillRecords.set(nonce, { ...claim });
+      return { kind: "claimed" };
+    }
+    if (record.sessionId !== claim.sessionId) return { kind: "foreign" };
+    if (record.planDigest !== claim.planDigest) return { kind: "plan-mismatch" };
+    if (record.sourceDigest !== claim.sourceDigest) return { kind: "source-mismatch" };
+    if (record.outcome) return { kind: "replay", outcome: record.outcome };
+    return { kind: "resume" };
+  }
+
+  /** Attach the produced outcome to a claimed nonce; a byte-identical repeat replays it. */
+  completeFillNonce(nonce: string, outcome: FillOutcome): void {
+    const record = this.fillRecords.get(nonce);
+    if (record) record.outcome = outcome;
+  }
+
   /** Create a private per-job directory owned by the current user. */
   async newJobDir(prefix: string): Promise<{ id: string; dir: string }> {
     const id = randomHandle();
@@ -296,6 +365,8 @@ export class JobManager {
     jobDir: string;
     outputPath: string;
     pageCount: number;
+    /** Overrides the default TTL (fill outputs retain longer). */
+    ttlMs?: number;
   }): Promise<RetainedOutput> {
     const fileStat = await stat(options.outputPath);
     if (fileStat.size > LIMITS.maxOutputBytes) {
@@ -318,7 +389,7 @@ export class JobManager {
       bytes: fileStat.size,
       pageCount: options.pageCount,
       createdAt: at,
-      expiresAt: at + this.outputTtlMs,
+      expiresAt: at + (options.ttlMs ?? this.outputTtlMs),
       leased: false,
       deleteAfterRelease: false
     };
@@ -415,7 +486,7 @@ export class JobManager {
     }
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      if (!/^(job-|pages-|compress-)[0-9a-f]{32}$/.test(entry.name)) continue;
+      if (!/^(job-|pages-|compress-|fill-)[0-9a-f]{32}$/.test(entry.name)) continue;
       const full = join(this.tempRoot, entry.name);
       try {
         const fileStat = await lstat(full);

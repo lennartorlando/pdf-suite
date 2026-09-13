@@ -16,6 +16,10 @@ export type MultipartFailureCode =
   | "MANIFEST_TOO_LARGE"
   | "MANIFEST_INVALID"
   | "DUPLICATE_MANIFEST"
+  | "MISSING_PLAN"
+  | "PLAN_TOO_LARGE"
+  | "DUPLICATE_PLAN"
+  | "MISSING_SOURCE"
   | "UNKNOWN_PART"
   | "DUPLICATE_PART"
   | "TOO_MANY_PARTS"
@@ -48,23 +52,130 @@ export interface StreamedUpload {
   totalBytes: number;
 }
 
+export interface StreamedFillUpload {
+  /** Bounded plan field bytes, digested verbatim for idempotency (KTD18). */
+  planRaw: string;
+  /** Server-generated private path of the single source part. */
+  sourcePath: string;
+  sourceBytes: number;
+  /** Aggregate of plan field bytes plus source bytes. */
+  totalBytes: number;
+}
+
+export interface StreamedSourceUpload {
+  /** Server-generated private path of the single source part. */
+  sourcePath: string;
+  sourceBytes: number;
+  totalBytes: number;
+}
+
+/** One bounded field in a closed multipart contract. */
+interface MultipartFieldSpec {
+  name: string;
+  maxBytes: number;
+  required: boolean;
+  missingCode: MultipartFailureCode;
+  duplicateCode: MultipartFailureCode;
+  tooLargeCode: MultipartFailureCode;
+}
+
+/** The fixed shape of one multipart intake: named fields plus `source` files. */
+interface MultipartContract {
+  fields: readonly MultipartFieldSpec[];
+  fileField: string;
+  minFiles: number;
+  maxFiles: number;
+  maxFileBytes: number;
+  missingFileCode: MultipartFailureCode;
+  maxParts: number;
+  /**
+   * Parts busboy admits beyond `maxParts` so a kind-specific cap can name the
+   * real violation (a second fill source reports TOO_MANY_SOURCES, not the
+   * generic parts code). Zero keeps the parts cap as the outer boundary.
+   */
+  partsProbe: number;
+  maxTotalBytes: number;
+}
+
+interface ContractUpload {
+  fields: Map<string, string>;
+  sourcePaths: string[];
+  sourceBytes: number[];
+  totalBytes: number;
+}
+
+const EXPORT_CONTRACT: MultipartContract = {
+  fields: [
+    {
+      name: "manifest",
+      maxBytes: LIMITS.maxManifestBytes,
+      required: true,
+      missingCode: "MISSING_MANIFEST",
+      duplicateCode: "DUPLICATE_MANIFEST",
+      tooLargeCode: "MANIFEST_TOO_LARGE"
+    }
+  ],
+  fileField: "source",
+  minFiles: 0,
+  maxFiles: LIMITS.maxSources,
+  maxFileBytes: LIMITS.maxSourceBytes,
+  missingFileCode: "MISSING_SOURCE",
+  maxParts: LIMITS.maxParts,
+  partsProbe: 0,
+  maxTotalBytes: LIMITS.maxTotalBytes
+};
+
+const FILL_CONTRACT: MultipartContract = {
+  fields: [
+    {
+      name: "plan",
+      maxBytes: LIMITS.maxFillPlanBytes,
+      required: true,
+      missingCode: "MISSING_PLAN",
+      duplicateCode: "DUPLICATE_PLAN",
+      tooLargeCode: "PLAN_TOO_LARGE"
+    }
+  ],
+  fileField: "source",
+  minFiles: 1,
+  maxFiles: 1,
+  maxFileBytes: LIMITS.maxFillSourceBytes,
+  missingFileCode: "MISSING_SOURCE",
+  maxParts: LIMITS.maxFillParts,
+  partsProbe: 1,
+  maxTotalBytes: LIMITS.maxFillTotalBytes
+};
+
+const SOURCE_CONTRACT: MultipartContract = {
+  fields: [],
+  fileField: "source",
+  minFiles: 1,
+  maxFiles: 1,
+  maxFileBytes: LIMITS.maxFillSourceBytes,
+  missingFileCode: "MISSING_SOURCE",
+  maxParts: 1,
+  partsProbe: 1,
+  maxTotalBytes: LIMITS.maxFillSourceBytes
+};
+
 /**
- * Stream exactly one bounded manifest field plus generated source parts
- * into a private per-job directory. Each source is written once to a
- * server-generated name; client filenames are never persisted. No
- * file-sized JavaScript buffer is retained.
+ * Stream one closed multipart contract into a private per-job directory.
+ * Each source is written once to a server-generated name; client filenames
+ * are never persisted. Fields stay bounded values, never file buffers, and
+ * every byte counts toward the contract's aggregate cap.
  */
-export function streamExportMultipart(
+function streamContractMultipart(
   req: IncomingMessage,
   jobDir: string,
+  contract: MultipartContract,
   signal?: AbortSignal
-): Promise<StreamedUpload> {
+): Promise<ContractUpload> {
   const contentType = req.headers["content-type"];
   if (typeof contentType !== "string" || !contentType.includes("multipart/form-data")) {
-    return Promise.reject(new MultipartError("NOT_MULTIPART", "Export requires multipart form data.", 415));
+    return Promise.reject(new MultipartError("NOT_MULTIPART", "This route requires multipart form data.", 415));
   }
 
-  return new Promise<StreamedUpload>((resolve, reject) => {
+  return new Promise<ContractUpload>((resolve, reject) => {
     let busboy: BusboyInstance;
     let settled = false;
     const writtenPaths: string[] = [];
@@ -82,7 +193,7 @@ export function streamExportMultipart(
       void cleanup().finally(() => reject(error));
     };
 
-    const succeed = (upload: StreamedUpload): void => {
+    const succeed = (upload: ContractUpload): void => {
       if (settled) return;
       settled = true;
       resolve(upload);
@@ -94,15 +205,15 @@ export function streamExportMultipart(
         headers,
         limits: {
           fieldNameSize: 128,
-          fieldSize: LIMITS.maxManifestBytes + 1,
-          fields: 2,
-          files: LIMITS.maxSources,
-          parts: LIMITS.maxParts,
+          fieldSize: Math.max(0, ...contract.fields.map((field) => field.maxBytes)) + 1,
+          fields: contract.fields.length + 1,
+          files: contract.maxFiles,
+          parts: contract.maxParts + contract.partsProbe,
           headerPairs: LIMITS.maxHeaderPairs
         }
       });
     } catch {
-      reject(new MultipartError("NOT_MULTIPART", "Export requires multipart form data.", 415));
+      reject(new MultipartError("NOT_MULTIPART", "This route requires multipart form data.", 415));
       return;
     }
 
@@ -111,8 +222,8 @@ export function streamExportMultipart(
       return;
     }
 
-    let manifestRaw: string | null = null;
-    let manifestCount = 0;
+    const fieldValues = new Map<string, string>();
+    const fieldCounts = new Map<string, number>();
     const sourcePaths: string[] = [];
     const sourceBytes: number[] = [];
     let totalBytes = 0;
@@ -129,46 +240,47 @@ export function streamExportMultipart(
 
     busboy.on("field", (fieldname, value, _truncated, valueTruncated) => {
       partCount += 1;
-      if (partCount > LIMITS.maxParts) {
+      if (partCount > contract.maxParts) {
         fail(new MultipartError("TOO_MANY_PARTS", "Too many multipart sections.", 413));
         return;
       }
-      if (fieldname !== "manifest") {
+      const spec = contract.fields.find((field) => field.name === fieldname);
+      if (!spec) {
         fail(new MultipartError("UNKNOWN_PART", "Unknown multipart field.", 400));
         return;
       }
-      manifestCount += 1;
-      if (manifestCount > 1) {
-        fail(new MultipartError("DUPLICATE_MANIFEST", "Only one manifest is accepted.", 400));
+      const count = (fieldCounts.get(fieldname) ?? 0) + 1;
+      fieldCounts.set(fieldname, count);
+      if (count > 1) {
+        fail(new MultipartError(spec.duplicateCode, `Only one ${spec.name} is accepted.`, 400));
         return;
       }
-      if (valueTruncated || Buffer.byteLength(value, "utf8") > LIMITS.maxManifestBytes) {
-        fail(new MultipartError("MANIFEST_TOO_LARGE", "Manifest exceeds its byte cap.", 413));
+      if (valueTruncated || Buffer.byteLength(value, "utf8") > spec.maxBytes) {
+        fail(new MultipartError(spec.tooLargeCode, `${spec.name} exceeds its byte cap.`, 413));
         return;
       }
-      // The aggregate cap covers manifest field bytes as well as source
-      // bytes; the manifest stays a bounded field, never a file buffer.
+      // The aggregate cap covers field bytes as well as source bytes.
       totalBytes += Buffer.byteLength(value, "utf8");
-      if (totalBytes > LIMITS.maxTotalBytes) {
+      if (totalBytes > contract.maxTotalBytes) {
         fail(new MultipartError("TOTAL_TOO_LARGE", "Upload exceeds its total byte cap.", 413));
         return;
       }
-      manifestRaw = value;
+      fieldValues.set(fieldname, value);
     });
 
     busboy.on("file", (fieldname, stream: BusboyFileStream) => {
       partCount += 1;
-      if (partCount > LIMITS.maxParts) {
+      if (partCount > contract.maxParts) {
         stream.resume();
         fail(new MultipartError("TOO_MANY_PARTS", "Too many multipart sections.", 413));
         return;
       }
-      if (fieldname !== "source") {
+      if (fieldname !== contract.fileField) {
         stream.resume();
         fail(new MultipartError("UNKNOWN_PART", "Unknown multipart file part.", 400));
         return;
       }
-      if (sourceIndex >= LIMITS.maxSources) {
+      if (sourceIndex >= contract.maxFiles) {
         stream.resume();
         fail(new MultipartError("TOO_MANY_SOURCES", "Too many source files.", 413));
         return;
@@ -187,7 +299,7 @@ export function streamExportMultipart(
           const size = chunk.length;
           fileBytes += size;
           totalBytes += size;
-          if (fileBytes > LIMITS.maxSourceBytes) {
+          if (fileBytes > contract.maxFileBytes) {
             fileFailed = true;
             fail(new MultipartError("SOURCE_TOO_LARGE", "A source exceeds its byte cap.", 413));
             stream.destroy();
@@ -195,7 +307,7 @@ export function streamExportMultipart(
             rejectWrite(new Error("source too large"));
             return;
           }
-          if (totalBytes > LIMITS.maxTotalBytes) {
+          if (totalBytes > contract.maxTotalBytes) {
             fileFailed = true;
             fail(new MultipartError("TOTAL_TOO_LARGE", "Upload exceeds its total byte cap.", 413));
             stream.destroy();
@@ -255,7 +367,7 @@ export function streamExportMultipart(
     });
 
     busboy.on("fieldsLimit", () => {
-      fail(new MultipartError("DUPLICATE_MANIFEST", "Only one manifest is accepted.", 400));
+      fail(new MultipartError(contract.fields[0]?.duplicateCode ?? "UNKNOWN_PART", "Too many multipart fields.", 400));
     });
 
     busboy.on("error", (error) => {
@@ -269,11 +381,16 @@ export function streamExportMultipart(
 
     busboy.on("finish", () => {
       if (settled) return;
-      if (manifestRaw === null) {
-        fail(new MultipartError("MISSING_MANIFEST", "Export requires exactly one manifest.", 400));
+      for (const spec of contract.fields) {
+        if (spec.required && !fieldValues.has(spec.name)) {
+          fail(new MultipartError(spec.missingCode, `This route requires exactly one ${spec.name}.`, 400));
+          return;
+        }
+      }
+      if (sourcePaths.length < contract.minFiles) {
+        fail(new MultipartError(contract.missingFileCode, "This route requires exactly one source.", 400));
         return;
       }
-      const manifest = manifestRaw;
       void Promise.allSettled(pendingWrites).then((outcomes) => {
         finishSweep();
         if (settled) return;
@@ -281,7 +398,7 @@ export function streamExportMultipart(
           fail(new MultipartError("UPLOAD_ABORTED", "A source could not be stored.", 499));
           return;
         }
-        succeed({ manifestRaw: manifest, sourcePaths, sourceBytes, totalBytes });
+        succeed({ fields: fieldValues, sourcePaths, sourceBytes, totalBytes });
       });
     });
 
@@ -289,6 +406,58 @@ export function streamExportMultipart(
     req.on("error", () => fail(new MultipartError("UPLOAD_ABORTED", "Upload transport failed.", 499)));
     req.pipe(busboy);
   });
+}
+
+/**
+ * Stream exactly one bounded manifest field plus generated source parts
+ * into a private per-job directory. Each source is written once to a
+ * server-generated name; client filenames are never persisted. No
+ * file-sized JavaScript buffer is retained.
+ */
+export async function streamExportMultipart(
+  req: IncomingMessage,
+  jobDir: string,
+  signal?: AbortSignal
+): Promise<StreamedUpload> {
+  const upload = await streamContractMultipart(req, jobDir, EXPORT_CONTRACT, signal);
+  return {
+    manifestRaw: upload.fields.get("manifest") ?? "",
+    sourcePaths: upload.sourcePaths,
+    sourceBytes: upload.sourceBytes,
+    totalBytes: upload.totalBytes
+  };
+}
+
+/**
+ * Stream the fill contract: exactly one bounded `plan` field plus exactly
+ * one `source` file part (KTD12 — the browser sends values, not bytes).
+ */
+export async function streamFillMultipart(
+  req: IncomingMessage,
+  jobDir: string,
+  signal?: AbortSignal
+): Promise<StreamedFillUpload> {
+  const upload = await streamContractMultipart(req, jobDir, FILL_CONTRACT, signal);
+  return {
+    planRaw: upload.fields.get("plan") ?? "",
+    sourcePath: upload.sourcePaths[0],
+    sourceBytes: upload.sourceBytes[0],
+    totalBytes: upload.totalBytes
+  };
+}
+
+/** Stream the inventory contract: exactly one `source` file part, no fields. */
+export async function streamSourceUpload(
+  req: IncomingMessage,
+  jobDir: string,
+  signal?: AbortSignal
+): Promise<StreamedSourceUpload> {
+  const upload = await streamContractMultipart(req, jobDir, SOURCE_CONTRACT, signal);
+  return {
+    sourcePath: upload.sourcePaths[0],
+    sourceBytes: upload.sourceBytes[0],
+    totalBytes: upload.totalBytes
+  };
 }
 
 /**

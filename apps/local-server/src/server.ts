@@ -7,6 +7,7 @@ import { checkApiBoundary, isLoopbackHost } from "./api-guard.js";
 import { JobManager } from "./jobs.js";
 import { CAPABILITY_PROBE_TIMEOUT_MS, getCapabilities, handlePageExport, writeJson } from "./routes/edit.js";
 import { handleCompressRequest } from "./routes/compress.js";
+import { handleFormFill, handleFormInventory } from "./routes/fill.js";
 import { SessionStore, type TokenCheck } from "./session.js";
 
 const webRoot = fileURLToPath(new URL("../../web/dist/", import.meta.url));
@@ -149,6 +150,42 @@ async function dispatch(
     }
     try {
       await handlePageExport(req, res, url, {
+        sessions,
+        jobs,
+        sessionId: authenticated
+      });
+    } finally {
+      slot.release();
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/forms/inventory") {
+    const slot = jobs.acquireNativeSlot();
+    if (!slot) {
+      writeJson(res, 429, { ok: false, code: "NATIVE_BUSY", message: "Another native operation is in flight." });
+      return;
+    }
+    try {
+      await handleFormInventory(req, res, url, {
+        sessions,
+        jobs,
+        sessionId: authenticated
+      });
+    } finally {
+      slot.release();
+    }
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/forms/fill") {
+    const slot = jobs.acquireNativeSlot();
+    if (!slot) {
+      writeJson(res, 429, { ok: false, code: "NATIVE_BUSY", message: "Another native operation is in flight." });
+      return;
+    }
+    try {
+      await handleFormFill(req, res, url, {
         sessions,
         jobs,
         sessionId: authenticated

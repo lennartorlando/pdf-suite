@@ -45,6 +45,8 @@ export interface Capabilities {
   ghostscript: CapabilityStatus;
   ocrmypdf: CapabilityStatus;
   tesseract: CapabilityStatus & { languages: string[] };
+  /** Form filling requires qpdf (KTD3); its availability is the qpdf probe. */
+  fill: CapabilityStatus;
 }
 
 export const CAPABILITY_PROBE_TIMEOUT_MS = 15_000;
@@ -68,7 +70,7 @@ export async function getCapabilities(
   const [qpdf, ghostscript, ocrmypdf, tesseract] = probes.map(
     (probe) => (probe as PromiseFulfilledResult<unknown>).value
   ) as [CapabilityStatus, CapabilityStatus, CapabilityStatus, Capabilities["tesseract"]];
-  return { qpdf, ghostscript, ocrmypdf, tesseract };
+  return { qpdf, ghostscript, ocrmypdf, tesseract, fill: qpdf };
 }
 
 async function getPageExportCapabilities(
@@ -104,7 +106,7 @@ function rethrowTerminal(error: unknown): void {
   }
 }
 
-async function probeVersion(getVersion: () => Promise<string>, floor?: string): Promise<CapabilityStatus> {
+export async function probeVersion(getVersion: () => Promise<string>, floor?: string): Promise<CapabilityStatus> {
   try {
     const version = await getVersion();
     return { available: floor ? meetsNativeFloor(version, floor) : true, version };

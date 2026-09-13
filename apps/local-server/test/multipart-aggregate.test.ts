@@ -5,7 +5,7 @@ import type { IncomingMessage } from "node:http";
 import { PassThrough } from "node:stream";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { LIMITS } from "../src/jobs.js";
-import { MultipartError, streamExportMultipart } from "../src/multipart.js";
+import { MultipartError, streamExportMultipart, streamFillMultipart } from "../src/multipart.js";
 
 describe("multipart aggregate byte cap", () => {
   let jobDir = "";
@@ -82,4 +82,153 @@ describe("multipart aggregate byte cap", () => {
       code: "TOTAL_TOO_LARGE"
     } satisfies Partial<MultipartError>);
   }, 60_000);
+
+  describe("fill contract", () => {
+    function streamFill(body: Buffer, contentType: string): Promise<{
+      planRaw: string;
+      sourcePath: string;
+      sourceBytes: number;
+      totalBytes: number;
+    }> {
+      const req = new PassThrough() as PassThrough & {
+        headers: Record<string, string>;
+      };
+      req.headers = { "content-type": contentType, "content-length": String(body.length) };
+      const pending = streamFillMultipart(req as unknown as IncomingMessage, jobDir);
+      req.end(body);
+      return pending;
+    }
+
+    function buildFillMultipart(boundary: string, plan: string, source: Buffer): Buffer {
+      return Buffer.concat([
+        Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="plan"\r\n\r\n${plan}\r\n`, "utf8"),
+        Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="source"; filename="s.pdf"\r\nContent-Type: application/pdf\r\n\r\n`,
+          "utf8"
+        ),
+        source,
+        Buffer.from(`\r\n--${boundary}--\r\n`, "utf8")
+      ]);
+    }
+
+    it("counts plan field bytes in the aggregate total", async () => {
+      const plan = JSON.stringify({ version: 1, entries: [] });
+      const source = Buffer.alloc(1024, 0x25);
+      const boundary = "fillaggregate";
+      const upload = await streamFill(
+        buildFillMultipart(boundary, plan, source),
+        `multipart/form-data; boundary=${boundary}`
+      );
+      expect(upload.planRaw).toBe(plan);
+      expect(upload.sourceBytes).toBe(1024);
+      expect(upload.totalBytes).toBe(Buffer.byteLength(plan, "utf8") + 1024);
+      await rm(upload.sourcePath, { force: true });
+    });
+
+    it("rejects a missing plan, a duplicate plan and an unknown part", async () => {
+      const source = Buffer.alloc(16, 0x25);
+      const boundary = "fillmissing";
+      await expect(
+        streamFill(
+          Buffer.concat([
+            Buffer.from(
+              `--${boundary}\r\nContent-Disposition: form-data; name="source"; filename="s.pdf"\r\nContent-Type: application/pdf\r\n\r\n`,
+              "utf8"
+            ),
+            source,
+            Buffer.from(`\r\n--${boundary}--\r\n`, "utf8")
+          ]),
+          `multipart/form-data; boundary=${boundary}`
+        )
+      ).rejects.toMatchObject({ name: "MultipartError", code: "MISSING_PLAN" } satisfies Partial<MultipartError>);
+
+      const plan = JSON.stringify({ version: 1, entries: [] });
+      const dupBoundary = "filldup";
+      await expect(
+        streamFill(
+          Buffer.concat([
+            Buffer.from(`--${dupBoundary}\r\nContent-Disposition: form-data; name="plan"\r\n\r\n${plan}\r\n`, "utf8"),
+            Buffer.from(`--${dupBoundary}\r\nContent-Disposition: form-data; name="plan"\r\n\r\n${plan}\r\n`, "utf8"),
+            Buffer.from(
+              `--${dupBoundary}\r\nContent-Disposition: form-data; name="source"; filename="s.pdf"\r\nContent-Type: application/pdf\r\n\r\n`,
+              "utf8"
+            ),
+            source,
+            Buffer.from(`\r\n--${dupBoundary}--\r\n`, "utf8")
+          ]),
+          `multipart/form-data; boundary=${dupBoundary}`
+        )
+      ).rejects.toMatchObject({ name: "MultipartError", code: "DUPLICATE_PLAN" } satisfies Partial<MultipartError>);
+
+      const unknownBoundary = "fillunknown";
+      await expect(
+        streamFill(
+          Buffer.concat([
+            Buffer.from(`--${unknownBoundary}\r\nContent-Disposition: form-data; name="plan"\r\n\r\n${plan}\r\n`, "utf8"),
+            Buffer.from(`--${unknownBoundary}\r\nContent-Disposition: form-data; name="notes"\r\n\r\nhi\r\n`, "utf8"),
+            Buffer.from(
+              `--${unknownBoundary}\r\nContent-Disposition: form-data; name="source"; filename="s.pdf"\r\nContent-Type: application/pdf\r\n\r\n`,
+              "utf8"
+            ),
+            source,
+            Buffer.from(`\r\n--${unknownBoundary}--\r\n`, "utf8")
+          ]),
+          `multipart/form-data; boundary=${unknownBoundary}`
+        )
+      ).rejects.toMatchObject({ name: "MultipartError", code: "UNKNOWN_PART" } satisfies Partial<MultipartError>);
+    });
+
+    it("rejects a missing source and a second source", async () => {
+      const plan = JSON.stringify({ version: 1, entries: [] });
+      const nosource = "fillnosource";
+      await expect(
+        streamFill(
+          Buffer.from(`--${nosource}\r\nContent-Disposition: form-data; name="plan"\r\n\r\n${plan}\r\n--${nosource}--\r\n`, "utf8"),
+          `multipart/form-data; boundary=${nosource}`
+        )
+      ).rejects.toMatchObject({ name: "MultipartError", code: "MISSING_SOURCE" } satisfies Partial<MultipartError>);
+
+      const source = Buffer.alloc(16, 0x25);
+      const twoBoundary = "filltwo";
+      await expect(
+        streamFill(
+          Buffer.concat([
+            Buffer.from(`--${twoBoundary}\r\nContent-Disposition: form-data; name="plan"\r\n\r\n${plan}\r\n`, "utf8"),
+            Buffer.from(
+              `--${twoBoundary}\r\nContent-Disposition: form-data; name="source"; filename="a.pdf"\r\nContent-Type: application/pdf\r\n\r\n`,
+              "utf8"
+            ),
+            source,
+            Buffer.from(
+              `\r\n--${twoBoundary}\r\nContent-Disposition: form-data; name="source"; filename="b.pdf"\r\nContent-Type: application/pdf\r\n\r\n`,
+              "utf8"
+            ),
+            source,
+            Buffer.from(`\r\n--${twoBoundary}--\r\n`, "utf8")
+          ]),
+          `multipart/form-data; boundary=${twoBoundary}`
+        )
+      ).rejects.toMatchObject({ name: "MultipartError", code: "TOO_MANY_SOURCES" } satisfies Partial<MultipartError>);
+    });
+
+    it("rejects a plan over its byte cap", async () => {
+      const boundary = "fillbigplan";
+      const source = Buffer.alloc(16, 0x25);
+      await expect(
+        streamFill(
+          Buffer.concat([
+            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="plan"\r\n\r\n`, "utf8"),
+            Buffer.alloc(LIMITS.maxFillPlanBytes + 1, 0x20),
+            Buffer.from(
+              `\r\n--${boundary}\r\nContent-Disposition: form-data; name="source"; filename="s.pdf"\r\nContent-Type: application/pdf\r\n\r\n`,
+              "utf8"
+            ),
+            source,
+            Buffer.from(`\r\n--${boundary}--\r\n`, "utf8")
+          ]),
+          `multipart/form-data; boundary=${boundary}`
+        )
+      ).rejects.toMatchObject({ name: "MultipartError", code: "PLAN_TOO_LARGE" } satisfies Partial<MultipartError>);
+    });
+  });
 });
