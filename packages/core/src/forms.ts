@@ -18,7 +18,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { dirname, join } from "node:path";
 import { CompressionError, isCompressionError } from "./errors.js";
-import { FormPlanError, isTerminalEntryStatus, parseFormPlan, type FormPlan, type PdfRect } from "./form-plan.js";
+import { FormPlanError, isTerminalEntryStatus, parseFormPlan, type FormPlan, type FormPlanEntryStatus, type FormPlanFieldEntry, type FormPlanPlacement, type PdfRect } from "./form-plan.js";
 import {
   createFormInventory,
   toDocumentText,
@@ -100,8 +100,14 @@ export interface FormInventoryResult {
 }
 
 export interface FillFormOptions {
-  /** Absolute path of the source PDF; never written. */
+  /** Absolute path of the source PDF; never written. The plan's source binding must equal it. */
   sourcePath: string;
+  /**
+   * The bytes the operation actually reads, when the caller snapshotted the
+   * source after approving it (KTD7). Defaults to `sourcePath`; the binding
+   * check still runs against `sourcePath` and the plan.
+   */
+  workingSourcePath?: string;
   /** Absolute path of the plan file; its bytes are handed to the child unchanged. */
   planPath: string;
   /** Absolute path of the destination PDF; never clobbered unless the plan approved overwrite. */
@@ -464,8 +470,17 @@ async function readPlanFile(planPath: string): Promise<FormPlan> {
   return parseFormPlan(parsed);
 }
 
-/** Contextual plan validation (AE12): every entry resolved against the joined inventory. */
-function validatePlanEntries(plan: FormPlan, joined: JoinedForm): Map<string, JoinedField> {
+/**
+ * Contextual plan validation (AE12): every entry resolved against the joined
+ * inventory. When `outstanding` is given (the `validate` pass), non-terminal
+ * field entries are collected for the interview loop instead of refusing the
+ * plan outright (KTD8); without it the check is apply-strict.
+ */
+function validatePlanEntries(
+  plan: FormPlan,
+  joined: JoinedForm,
+  outstanding?: { fieldId: string; status: FormPlanEntryStatus }[]
+): Map<string, JoinedField> {
   const answered = new Map<string, JoinedField>();
   for (const entry of plan.entries) {
     if (entry.kind !== "field") {
@@ -478,18 +493,22 @@ function validatePlanEntries(plan: FormPlan, joined: JoinedForm): Map<string, Jo
       }
       continue;
     }
-    if (!isTerminalEntryStatus(entry.status)) {
-      throw new CompressionError(
-        "FILL_PLAN_INCOMPLETE",
-        `Plan entry for field "${entry.fieldId}" is ${entry.status}; apply requires answered or skipped.`,
-        { fieldId: entry.fieldId, status: entry.status }
-      );
-    }
     const field = joined.byId.get(entry.fieldId) ?? joined.widgetOwner.get(entry.fieldId);
     if (!field) {
       throw new CompressionError("FILL_UNKNOWN_FIELD", `Plan names a field the document does not contain.`, {
         fieldId: entry.fieldId
       });
+    }
+    if (!isTerminalEntryStatus(entry.status)) {
+      if (outstanding) {
+        outstanding.push({ fieldId: entry.fieldId, status: entry.status });
+        continue;
+      }
+      throw new CompressionError(
+        "FILL_PLAN_INCOMPLETE",
+        `Plan entry for field "${entry.fieldId}" is ${entry.status}; apply requires answered or skipped.`,
+        { fieldId: entry.fieldId, status: entry.status }
+      );
     }
     if (entry.status !== "answered") continue;
     if (field.entry.readOnly || field.entry.type === "group" || field.entry.type === "signature" || field.entry.type === "other") {
@@ -576,36 +595,52 @@ function expectedWidgetState(widget: JoinedWidget, want: string): string {
   return "Off";
 }
 
+interface FieldReadback {
+  applied: boolean;
+  /** Which aspect could not be confirmed, for the failure message. */
+  detail?: string;
+  /** The observed value or appearance state; surfaced only to callers that digest or reveal it (R13). */
+  actual?: string;
+}
+
 /**
- * Prove answered field values on an interactive artifact (KTD14): every
- * widget row of each answered field must report the approved value, and
- * button fields must additionally report the approved appearance state.
+ * Per-field readback on an interactive artifact (KTD14): every widget row
+ * must report the expected value, and button fields must additionally report
+ * the expected appearance state. Returns a verdict; `readbackFieldValues`
+ * turns a negative verdict into the fill's fail-fast error.
  */
+function checkFieldReadback(raw: QpdfJson, field: JoinedField, expected: string): FieldReadback {
+  const rows = rowsForField(raw, field);
+  // No row for the field: the artifact holds nothing, reported as empty.
+  if (rows.length === 0) return { applied: false, detail: "value", actual: "" };
+  if (field.entry.type === "checkbox" || field.entry.type === "radio") {
+    const want = expected === "" ? "Off" : expected;
+    for (const { row, widgetRef } of rows) {
+      const widget = field.widgets.find((candidate) => candidate.widgetId === widgetRef);
+      const wantState = widget ? expectedWidgetState(widget, want) : "Off";
+      const got = appearanceName(row.annotation?.appearancestate);
+      if (got !== wantState) return { applied: false, detail: "appearance state", actual: got };
+    }
+    const selected = field.widgets.find((widget) => expectedWidgetState(widget, want) === want && want !== "Off");
+    const wantValue = selected ? expectedWidgetState(selected, want) : want === "Off" ? "Off" : want;
+    for (const { row } of rows) {
+      const got = decodeQpdfText(row.value);
+      if (got !== want && got !== wantValue) return { applied: false, detail: "value", actual: got };
+    }
+    return { applied: true };
+  }
+  for (const { row } of rows) {
+    const got = decodeQpdfText(row.value);
+    if (got !== expected) return { applied: false, detail: "value", actual: got };
+  }
+  return { applied: true };
+}
+
+/** Prove answered field values on an interactive artifact (KTD14). */
 function readbackFieldValues(raw: QpdfJson, answered: Map<string, JoinedField>, values: Map<string, string>): void {
   for (const [fieldId, field] of answered) {
-    const rows = rowsForField(raw, field);
-    if (rows.length === 0) throw readbackFail(fieldId, "value");
-    const expected = values.get(fieldId) ?? "";
-    if (field.entry.type === "checkbox" || field.entry.type === "radio") {
-      const want = expected === "" ? "Off" : expected;
-      for (const { row, widgetRef } of rows) {
-        const widget = field.widgets.find((candidate) => candidate.widgetId === widgetRef);
-        const wantState = widget ? expectedWidgetState(widget, want) : "Off";
-        if (appearanceName(row.annotation?.appearancestate) !== wantState) {
-          throw readbackFail(fieldId, "appearance state");
-        }
-      }
-      const selected = field.widgets.find((widget) => expectedWidgetState(widget, want) === want && want !== "Off");
-      const wantValue = selected ? expectedWidgetState(selected, want) : want === "Off" ? "Off" : want;
-      for (const { row } of rows) {
-        const got = decodeQpdfText(row.value);
-        if (got !== want && got !== wantValue) throw readbackFail(fieldId, "value");
-      }
-      continue;
-    }
-    for (const { row } of rows) {
-      if (decodeQpdfText(row.value) !== expected) throw readbackFail(fieldId, "value");
-    }
+    const check = checkFieldReadback(raw, field, values.get(fieldId) ?? "");
+    if (!check.applied) throw readbackFail(fieldId, check.detail ?? "value");
   }
 }
 
@@ -648,23 +683,27 @@ function pageAnnotationDicts(raw: QpdfJson, pageIndex: number): Record<string, u
   return dicts;
 }
 
+/** One placement verdict on an interactive artifact: a page annotation carries the approved rect and text. */
+function checkPlacementReadback(raw: QpdfJson, entry: FormPlanPlacement): boolean {
+  const wantRect = entry.rect;
+  const annotations = pageAnnotationDicts(raw, entry.page);
+  return annotations.some((dict) => {
+    if (!rectMatches(dict["/Rect"], wantRect)) return false;
+    if (entry.kind === "text") {
+      return dict["/Subtype"] === "/FreeText" && decodeQpdfText(dict["/Contents"]) === entry.text;
+    }
+    if (entry.kind === "checkmark") {
+      return dict["/Subtype"] === "/Ink" && Array.isArray(dict["/InkList"]);
+    }
+    return dict["/Subtype"] === "/Stamp";
+  });
+}
+
 /** Prove placements on an interactive artifact: page annotations carry the approved rect and text. */
 function readbackPlacements(raw: QpdfJson, plan: FormPlan): void {
   for (const entry of plan.entries) {
     if (entry.kind === "field") continue;
-    const wantRect = entry.rect;
-    const annotations = pageAnnotationDicts(raw, entry.page);
-    const found = annotations.some((dict) => {
-      if (!rectMatches(dict["/Rect"], wantRect)) return false;
-      if (entry.kind === "text") {
-        return dict["/Subtype"] === "/FreeText" && decodeQpdfText(dict["/Contents"]) === entry.text;
-      }
-      if (entry.kind === "checkmark") {
-        return dict["/Subtype"] === "/Ink" && Array.isArray(dict["/InkList"]);
-      }
-      return dict["/Subtype"] === "/Stamp";
-    });
-    if (!found) {
+    if (!checkPlacementReadback(raw, entry)) {
       throw new CompressionError(
         "FILL_READBACK_FAILED",
         `Readback could not confirm the approved ${entry.kind} placement on page ${entry.page}.`,
@@ -844,6 +883,48 @@ function widgetInkPresent(objects: Map<string, QdfObject>, pages: string[], widg
   return placedInkPresent(objects, pages, widget.page, widget.rect);
 }
 
+/** Per-field verdict on burned-in page content: the expected value is drawn and visible. */
+function checkBurnedFieldReadback(
+  objects: Map<string, QdfObject>,
+  pages: string[],
+  field: JoinedField,
+  expected: string
+): FieldReadback {
+  if (field.entry.type === "text" || field.entry.type === "choice") {
+    if (expected === "") return { applied: true };
+    const marker = contentMarker(expected);
+    for (const widget of field.widgets) {
+      if (!pageContentText(objects, pages, widget.page).text.includes(marker)) {
+        return { applied: false, detail: "content" };
+      }
+    }
+    return { applied: true };
+  }
+  const want = expected === "" ? "Off" : expected;
+  for (const widget of field.widgets) {
+    const active =
+      field.entry.type === "radio"
+        ? widget.onStates.includes(want) || widget.exportValues === want
+        : want !== "Off";
+    if (active && !widgetInkPresent(objects, pages, widget)) {
+      return { applied: false, detail: "appearance" };
+    }
+  }
+  return { applied: true };
+}
+
+/** Per-placement verdict on burned-in page content. */
+function checkBurnedPlacementReadback(
+  objects: Map<string, QdfObject>,
+  pages: string[],
+  entry: FormPlanPlacement
+): boolean {
+  if (entry.kind === "text") {
+    return pageContentText(objects, pages, entry.page).text.includes(contentMarker(entry.text));
+  }
+  return placedInkPresent(objects, pages, entry.page, entry.rect);
+}
+
 /** Prove every answered entry and placement is visible in burned-in page content (KTD9, KTD14). */
 function readbackBurnedContent(
   objects: Map<string, QdfObject>,
@@ -853,41 +934,12 @@ function readbackBurnedContent(
   values: Map<string, string>
 ): void {
   for (const [fieldId, field] of answered) {
-    const expected = values.get(fieldId) ?? "";
-    if (field.entry.type === "text" || field.entry.type === "choice") {
-      if (expected === "") continue;
-      const marker = contentMarker(expected);
-      for (const widget of field.widgets) {
-        if (!pageContentText(objects, pages, widget.page).text.includes(marker)) {
-          throw readbackFail(fieldId, "content");
-        }
-      }
-      continue;
-    }
-    const want = expected === "" ? "Off" : expected;
-    for (const widget of field.widgets) {
-      const active =
-        field.entry.type === "radio"
-          ? widget.onStates.includes(want) || widget.exportValues === want
-          : want !== "Off";
-      if (active && !widgetInkPresent(objects, pages, widget)) {
-        throw readbackFail(fieldId, "appearance");
-      }
-    }
+    const check = checkBurnedFieldReadback(objects, pages, field, values.get(fieldId) ?? "");
+    if (!check.applied) throw readbackFail(fieldId, check.detail ?? "content");
   }
   for (const entry of plan.entries) {
     if (entry.kind === "field") continue;
-    if (entry.kind === "text") {
-      if (!pageContentText(objects, pages, entry.page).text.includes(contentMarker(entry.text))) {
-        throw new CompressionError(
-          "FILL_READBACK_FAILED",
-          `Readback could not confirm the burned-in text placement on page ${entry.page}.`,
-          { page: entry.page, kind: entry.kind }
-        );
-      }
-      continue;
-    }
-    if (!placedInkPresent(objects, pages, entry.page, entry.rect)) {
+    if (!checkBurnedPlacementReadback(objects, pages, entry)) {
       throw new CompressionError(
         "FILL_READBACK_FAILED",
         `Readback could not confirm the burned-in ${entry.kind} placement on page ${entry.page}.`,
@@ -985,6 +1037,196 @@ export async function inventoryFormFields(
   }
 }
 
+/** A non-terminal field entry the interview loop still has to settle (KTD8). */
+export interface FormPlanOutstandingEntry {
+  readonly fieldId: string;
+  readonly status: FormPlanEntryStatus;
+}
+
+export interface FormPlanCheck {
+  /** Field entries still needing an answer, re-emitted for the loop. */
+  readonly outstanding: readonly FormPlanOutstandingEntry[];
+  /** Placement entries frozen to their absolute rectangles (KTD7). */
+  readonly placements: readonly FormPlanPlacement[];
+  readonly inventory: FormInventory;
+  readonly pageCount: number;
+  readonly qpdfVersion: string;
+  readonly warnings: readonly string[];
+  readonly removedRestrictions: boolean;
+  readonly removedUsageRights: boolean;
+}
+
+/**
+ * The validate operation: check a plan against the source document without
+ * mutating anything. Non-terminal field entries are collected, not refused —
+ * the caller re-asks exactly those (KTD8, AE10). Every plan defect that is not
+ * "still awaiting an answer" still refuses.
+ */
+export async function checkFormPlan(
+  plan: FormPlan,
+  sourcePath: string,
+  options: InspectFormOptions = {}
+): Promise<FormPlanCheck> {
+  assertNotAborted(options.signal);
+  const calls: NativeCallOptions = {
+    run: options.run ?? defaultNativeRunner,
+    signal: options.signal,
+    timeoutMs: options.timeoutMs
+  };
+  const qpdfVersion = await getQpdfVersion(calls);
+  assertNativeFloor("qpdf", qpdfVersion, QPDF_SECURITY_FLOOR);
+  await validatePdfFillInput(sourcePath);
+
+  const workspace = await createTempWorkspace("pdf-fill-check-", options.workspaceParent);
+  try {
+    const admission = await admitFillSource(sourcePath, workspace.path, calls);
+    const joined = await joinDocumentFields(admission.workingPath, workspace.path, calls);
+    const outstanding: FormPlanOutstandingEntry[] = [];
+    validatePlanEntries(plan, joined, outstanding);
+    return {
+      outstanding,
+      placements: plan.entries.filter((entry): entry is FormPlanPlacement => entry.kind !== "field"),
+      inventory: joined.inventory,
+      pageCount: admission.inspection.pageCount,
+      qpdfVersion,
+      warnings: admission.inspection.warnings,
+      removedRestrictions: admission.removedRestrictions,
+      removedUsageRights: admission.removedUsageRights
+    };
+  } finally {
+    await workspace.cleanup();
+  }
+}
+
+/** Per-field verification verdict: whether the artifact carries the approved state. */
+export interface FormFieldVerification {
+  readonly fieldId: string;
+  readonly status: "answered" | "skipped";
+  /** True when the artifact holds the approved value (answered) or the source value left standing (skipped). */
+  readonly applied: boolean;
+  /** Which readback aspect failed, when applied is false. */
+  readonly detail?: string;
+  /** The value the artifact was checked for; the caller digests or reveals it (R13). */
+  readonly expected: string;
+  /** The observed value or appearance state on mismatch; the caller digests or reveals it (R13). */
+  readonly actual?: string;
+}
+
+export interface FormPlacementVerification {
+  readonly kind: "text" | "checkmark" | "signature";
+  readonly page: number;
+  readonly applied: boolean;
+}
+
+export interface FormVerification {
+  readonly fields: readonly FormFieldVerification[];
+  readonly placements: readonly FormPlacementVerification[];
+  readonly allApplied: boolean;
+  readonly warnings: readonly string[];
+}
+
+/**
+ * The independent readback (R12, KTD14): join the source for expectations,
+ * then prove every plan entry against the delivered artifact — field values
+ * and appearance states via `qpdf --json`, burned-in content via a bounded
+ * `--qdf` dump. Reports a verdict per entry instead of throwing on the first
+ * mismatch; every plan defect still refuses before the artifact is read.
+ */
+export async function verifyFormFill(
+  plan: FormPlan,
+  sourcePath: string,
+  outputPath: string,
+  options: InspectFormOptions = {}
+): Promise<FormVerification> {
+  assertNotAborted(options.signal);
+  const calls: NativeCallOptions = {
+    run: options.run ?? defaultNativeRunner,
+    signal: options.signal,
+    timeoutMs: options.timeoutMs
+  };
+  const qpdfVersion = await getQpdfVersion(calls);
+  assertNativeFloor("qpdf", qpdfVersion, QPDF_SECURITY_FLOOR);
+  await validatePdfFillInput(outputPath);
+
+  const workspace = await createTempWorkspace("pdf-fill-verify-", options.workspaceParent);
+  try {
+    const admission = await admitFillSource(sourcePath, workspace.path, calls);
+    const joined = await joinDocumentFields(admission.workingPath, workspace.path, calls);
+    validatePlanEntries(plan, joined);
+
+    const fieldEntries = plan.entries.filter(
+      (entry): entry is FormPlanFieldEntry => entry.kind === "field"
+    );
+    const expected = new Map<string, string>();
+    for (const entry of fieldEntries) {
+      const field = joined.byId.get(entry.fieldId) ?? joined.widgetOwner.get(entry.fieldId);
+      expected.set(
+        entry.fieldId,
+        entry.status === "answered" ? entry.value : (field?.entry.currentValue ?? "")
+      );
+    }
+
+    let readback: { burned: { objects: Map<string, QdfObject>; pages: string[] } } | { interactive: QpdfJson };
+    if (plan.burnIn) {
+      const dumpPath = workspace.file("verify.qdf");
+      await writeQdfDump(outputPath, dumpPath, calls);
+      const dumpInfo = await stat(dumpPath);
+      if (dumpInfo.size > MAX_QDF_DUMP_BYTES) {
+        throw new CompressionError("FILL_READBACK_FAILED", "The decompressed readback dump exceeds its bound.", {
+          maxBytes: MAX_QDF_DUMP_BYTES
+        });
+      }
+      const objects = qdfObjects(await readFile(dumpPath, "latin1"));
+      const pages = qdfPageRefs(objects);
+      if (pages.length !== admission.inspection.pageCount) {
+        throw new CompressionError("FILL_READBACK_FAILED", "The delivered page tree could not be enumerated.", {
+          pageCount: pages.length
+        });
+      }
+      readback = { burned: { objects, pages } };
+    } else {
+      readback = { interactive: (await readQpdfJson(outputPath, calls)).raw };
+    }
+
+    const fields: FormFieldVerification[] = [];
+    for (const entry of fieldEntries) {
+      const field = joined.byId.get(entry.fieldId) ?? joined.widgetOwner.get(entry.fieldId);
+      if (!field) continue;
+      const want = expected.get(entry.fieldId) ?? "";
+      const check =
+        "burned" in readback
+          ? checkBurnedFieldReadback(readback.burned.objects, readback.burned.pages, field, want)
+          : checkFieldReadback(readback.interactive, field, want);
+      fields.push({
+        fieldId: entry.fieldId,
+        status: entry.status as "answered" | "skipped",
+        applied: check.applied,
+        expected: want,
+        ...(check.detail !== undefined ? { detail: check.detail } : {}),
+        ...(check.actual !== undefined ? { actual: check.actual } : {})
+      });
+    }
+    const placements: FormPlacementVerification[] = plan.entries
+      .filter((entry): entry is FormPlanPlacement => entry.kind !== "field")
+      .map((entry) => ({
+        kind: entry.kind,
+        page: entry.page,
+        applied:
+          "burned" in readback
+            ? checkBurnedPlacementReadback(readback.burned.objects, readback.burned.pages, entry)
+            : checkPlacementReadback(readback.interactive, entry)
+      }));
+    return {
+      fields,
+      placements,
+      allApplied: fields.every((field) => field.applied) && placements.every((placement) => placement.applied),
+      warnings: admission.inspection.warnings
+    };
+  } finally {
+    await workspace.cleanup();
+  }
+}
+
 /**
  * The fill operation: admit, join, validate the approved plan against the
  * inventory, run the bounded child, strip field actions, collapse
@@ -1004,7 +1246,10 @@ export async function fillForm(options: FillFormOptions): Promise<FillSummary> {
       { planSource: plan.source, planDestination: plan.destination }
     );
   }
-  const scan = await validatePdfFillInput(options.sourcePath);
+  // The bytes read are the caller-approved snapshot when one is supplied
+  // (KTD7); the binding check above still pins the plan's source path.
+  const readPath = options.workingSourcePath ?? options.sourcePath;
+  const scan = await validatePdfFillInput(readPath);
   if (scan.sizeBytes > FILL_MAX_SOURCE_BYTES) {
     throw new CompressionError(
       "FILL_INPUT_TOO_LARGE",
@@ -1012,10 +1257,10 @@ export async function fillForm(options: FillFormOptions): Promise<FillSummary> {
       { inputPath: options.sourcePath, sizeBytes: scan.sizeBytes }
     );
   }
-  const sourceHash = await hashFile(options.sourcePath);
+  const sourceHash = await hashFile(readPath);
   let clearDestination = false;
   try {
-    await assertFreshDestination(options.destinationPath, [options.sourcePath]);
+    await assertFreshDestination(options.destinationPath, [options.sourcePath, readPath]);
   } catch (error) {
     if (!plan.overwrite || !isCompressionError(error) || error.code !== "OUTPUT_EXISTS") throw error;
     clearDestination = true;
@@ -1033,7 +1278,7 @@ export async function fillForm(options: FillFormOptions): Promise<FillSummary> {
   const workspace = await createTempWorkspace("pdf-fill-", options.workspaceParent);
   const stagingPath = join(dirname(options.destinationPath), `.pdf-fill-staging-${randomUUID()}.pdf`);
   try {
-    const admission = await admitFillSource(options.sourcePath, workspace.path, calls);
+    const admission = await admitFillSource(readPath, workspace.path, calls);
     const joined = await joinDocumentFields(admission.workingPath, workspace.path, calls);
     const answered = validatePlanEntries(plan, joined);
     const values = new Map<string, string>();
@@ -1171,7 +1416,7 @@ export async function fillForm(options: FillFormOptions): Promise<FillSummary> {
     await options.resourceCheck?.(0);
     await publishNoClobber(stagingPath, options.destinationPath);
     const outputStat = await stat(options.destinationPath);
-    const afterHash = await hashFile(options.sourcePath);
+    const afterHash = await hashFile(readPath);
     if (afterHash !== sourceHash) {
       throw new CompressionError("ENGINE_FAILED", "The source changed during the fill operation.", {
         inputPath: options.sourcePath

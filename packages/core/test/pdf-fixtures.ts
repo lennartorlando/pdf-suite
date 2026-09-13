@@ -27,6 +27,8 @@ export interface FixtureFeatures {
   formMaxLen?: boolean;
   /** Text field carrying a /TU tooltip. */
   formTooltip?: string;
+  /** A second text field with no /T name and no /TU tooltip (AE5: no derivable label). */
+  formUnnamedField?: boolean;
   /** Text field with the password flag. */
   formPassword?: boolean;
   /** The text field's widget is flagged hidden+no-view. */
@@ -196,7 +198,8 @@ export function buildTestPdf(pages: FixturePage[], features: FixtureFeatures = {
     features.formRadio ||
     features.formChoice ||
     features.formSpanPages ||
-    features.formMergedField;
+    features.formMergedField ||
+    features.formUnnamedField;
   if (wantsFields || features.xfaDynamic) {
     const form = nextId++;
     const fieldIds: number[] = [];
@@ -257,6 +260,11 @@ export function buildTestPdf(pages: FixturePage[], features: FixtureFeatures = {
         (widget) =>
           `<< /FT /Tx /T (fixture-name) /V (${value}) /Kids [${widget} 0 R]${fieldExtras.length ? ` ${fieldExtras.join(" ")}` : ""} >>`,
         widgetExtras,
+      );
+    }
+    if (features.formUnnamedField) {
+      addField(
+        (widget) => `<< /FT /Tx /V () /Kids [${widget} 0 R] >>`
       );
     }
     if (features.formCheckbox) {

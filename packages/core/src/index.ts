@@ -1,5 +1,5 @@
 export { compressPdf, type CompressionOptions, type CompressionSummary } from "./compress.js";
-export { CompressionError, isCompressionError, type CompressionErrorCode } from "./errors.js";
+export { CompressionError, isCompressionError, COMPRESSION_ERROR_CODES, type CompressionErrorCode } from "./errors.js";
 export {
   ocrPdf,
   normalizeOcrOptions,
@@ -52,6 +52,7 @@ export {
   assertNativeFloor,
   getQpdfVersion,
   getGhostscriptVersion,
+  defaultNativeRunner,
   classifyQpdfJson,
   isAdmissibleFor,
   CLASSIFIER_NODE_BUDGET,
@@ -75,11 +76,18 @@ export { ghostscriptArgs } from "./engines/ghostscript.js";
 export {
   fillForm,
   inventoryFormFields,
+  checkFormPlan,
+  verifyFormFill,
   FILL_MAX_SOURCE_BYTES,
   FILL_MAX_OUTPUT_BYTES,
   FILL_MAX_PLAN_BYTES,
   type FillFormOptions,
   type FillSummary,
   type InspectFormOptions,
-  type FormInventoryResult
+  type FormInventoryResult,
+  type FormPlanCheck,
+  type FormPlanOutstandingEntry,
+  type FormVerification,
+  type FormFieldVerification,
+  type FormPlacementVerification
 } from "./forms.js";

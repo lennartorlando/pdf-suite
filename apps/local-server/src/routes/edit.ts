@@ -19,6 +19,7 @@ import {
   type OcrOptions
 } from "@pdf-compressor/core";
 import { parsePageManifest } from "@pdf-compressor/core/page-manifest";
+import { SchemaError } from "@pdf-compressor/core/schema-error";
 import { LIMITS, RETAINED_OUTPUT_CAPACITY, type JobManager } from "../jobs.js";
 import { assertManifestDepth, MultipartError, streamExportMultipart } from "../multipart.js";
 import type { SessionStore } from "../session.js";
@@ -137,8 +138,15 @@ async function probeTesseract(
   };
 }
 
-function sanitizeExportError(error: unknown): { status: number; code: string } {
+/**
+ * One explicit route status per core error code (KTD17): the switch is
+ * exhaustive over `CompressionErrorCode`, so a code added to the union without
+ * a case fails typecheck and the coverage test. Schema errors — plan,
+ * inventory, manifest — carry their own codes and are client errors.
+ */
+export function sanitizeExportError(error: unknown): { status: number; code: string } {
   if (error instanceof MultipartError) return { status: error.status, code: error.code };
+  if (error instanceof SchemaError) return { status: 400, code: error.code };
   if (error instanceof CompressionError) {
     switch (error.code) {
       case "MANIFEST_INVALID":
@@ -150,18 +158,37 @@ function sanitizeExportError(error: unknown): { status: number; code: string } {
       case "MANIFEST_EMPTY":
       case "OUTPUT_PAGE_LIMIT_EXCEEDED":
       case "OCR_OPTIONS_INVALID":
+      case "FILL_RECEIPT_REQUIRED":
+      case "FILL_RECEIPT_INVALID":
         return { status: 400, code: error.code };
       case "OUTPUT_EXISTS":
       case "OUTPUT_WOULD_OVERWRITE_INPUT":
+      case "FILL_PLAN_CHANGED":
+      case "FILL_SOURCE_CHANGED":
+      case "FILL_RECEIPT_CONSUMED":
         return { status: 409, code: error.code };
+      case "FILL_RECEIPT_EXPIRED":
+        return { status: 410, code: error.code };
+      case "FILL_INPUT_TOO_LARGE":
+        return { status: 413, code: error.code };
       case "INPUT_NOT_FOUND":
       case "INPUT_NOT_PDF":
       case "INPUT_ENCRYPTED":
       case "INPUT_SIGNED":
+      case "INPUT_XFA":
       case "INPUT_HAS_ACTIVE_CONTENT":
       case "INSPECTION_INCOMPLETE":
       case "OUTPUT_INVALID":
       case "OUTPUT_TOO_LARGE":
+      case "FILL_PLAN_INCOMPLETE":
+      case "FILL_PLAN_SOURCE_MISMATCH":
+      case "FILL_UNKNOWN_FIELD":
+      case "FILL_NOT_FILLABLE":
+      case "FILL_VALUE_INVALID":
+      case "FILL_SIGNATURE_FORBIDDEN":
+      case "FILL_APPEARANCE_MISSING":
+      case "FILL_READBACK_FAILED":
+      case "FILL_VERIFY_MISMATCH":
         return { status: 422, code: error.code };
       case "TEMP_QUOTA_EXCEEDED":
       case "DISK_RESERVE_EXHAUSTED":
@@ -170,12 +197,14 @@ function sanitizeExportError(error: unknown): { status: number; code: string } {
       case "ENGINE_UNAVAILABLE":
       case "OCR_LANGUAGE_UNAVAILABLE":
         return { status: 503, code: error.code };
+      case "ENGINE_FAILED":
+      case "PUBLISH_FAILED":
+      case "FILL_CHILD_OUT_OF_MEMORY":
+        return { status: 500, code: error.code };
       case "JOB_CANCELLED":
         return { status: 499, code: error.code };
       case "JOB_TIMEOUT":
         return { status: 504, code: error.code };
-      default:
-        return { status: 500, code: "EXPORT_FAILED" };
     }
   }
   if (error instanceof Error) {
