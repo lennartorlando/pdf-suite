@@ -24,6 +24,15 @@ import {
   sc5BudgetMs
 } from "../../scripts/benchmark-page-editor.mjs";
 import {
+  checkCorpusMatch,
+  environmentClass,
+  evaluateBudget,
+  percentileStats,
+  resolveBudgetName
+} from "../../scripts/benchmark-harness.mjs";
+import { evaluateSc5FormGate, SC5_FORM_BUDGETS_MS } from "../../scripts/benchmark-form-filling.mjs";
+import { BROWSER_BUDGETS_MS, evaluateBrowserGate } from "../../scripts/benchmark-browser.mjs";
+import {
   GHOSTSCRIPT_SECURITY_FLOOR as BUILT_GS_FLOOR,
   OCRMY_PDF_FEATURE_FLOOR as BUILT_OCR_FLOOR,
   QPDF_SECURITY_FLOOR as BUILT_QPDF_FLOOR
@@ -163,5 +172,75 @@ describe("release gates: benchmark SC5 gate", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("release gates: shared benchmark harness (U8)", () => {
+  it("computes p95 over sorted samples", () => {
+    const stats = percentileStats([10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200]);
+    expect(stats.samples).toBe(20);
+    expect(stats.p95Ms).toBe(200);
+    expect(stats.minMs).toBe(10);
+  });
+
+  it("refuses to record against a changed corpus", () => {
+    expect(checkCorpusMatch({ "a.pdf": "sha" }, { "a.pdf": "sha" }).ok).toBe(true);
+    const changed = checkCorpusMatch({ "a.pdf": "sha" }, { "a.pdf": "other" });
+    expect(changed.ok).toBe(false);
+    expect(changed.mismatched).toEqual(["a.pdf"]);
+    // No recorded corpus: first run admits anything.
+    expect(checkCorpusMatch(undefined, { "a.pdf": "x" }).ok).toBe(true);
+  });
+
+  it("classifies hosted runners so their numbers can never pose as reference evidence", () => {
+    expect(environmentClass({ CI: "true" })).toBe("hosted-runner");
+    expect(environmentClass({ GITHUB_ACTIONS: "true" })).toBe("hosted-runner");
+    expect(environmentClass({})).toBe("local");
+  });
+
+  it("refuses the reference-mac budget under CI and defaults each class to its own budget", () => {
+    expect(resolveBudgetName([], {})).toBe("reference-mac");
+    expect(resolveBudgetName([], { CI: "true" })).toBe("hosted-runner");
+    expect(resolveBudgetName(["--budget=hosted-runner"], {})).toBe("hosted-runner");
+    expect(() => resolveBudgetName(["--budget=reference-mac"], { CI: "true" })).toThrow(/reference-mac/);
+    expect(() => resolveBudgetName(["--budget=bogus"], {})).toThrow(/budget/);
+  });
+
+  it("evaluates a pure budget verdict", () => {
+    expect(evaluateBudget(100, 100).withinBudget).toBe(true);
+    expect(evaluateBudget(101, 100).withinBudget).toBe(false);
+  });
+});
+
+describe("release gates: form-fill SC5 gate (U8)", () => {
+  it("keeps separate budgets per environment class and fails an impossible one", () => {
+    expect(SC5_FORM_BUDGETS_MS["reference-mac"]).toBe(4000);
+    expect(evaluateSc5FormGate(3999, "reference-mac").withinBudget).toBe(true);
+    expect(evaluateSc5FormGate(4001, "reference-mac").withinBudget).toBe(false);
+    expect(evaluateSc5FormGate(4001, "hosted-runner").withinBudget).toBe(true);
+    expect(() => evaluateSc5FormGate(1, "nowhere")).toThrow();
+  });
+});
+
+describe("release gates: browser SC3/SC4 gates (U8)", () => {
+  it("fails an impossible budget on every gated metric", () => {
+    for (const metric of ["coldOpen", "typeInput", "checkboxToggle", "dragMove", "dragCommit"] as const) {
+      const ok = evaluateBrowserGate(metric, BROWSER_BUDGETS_MS["reference-mac"][metric], "reference-mac");
+      expect(ok.withinBudget).toBe(true);
+      const over = evaluateBrowserGate(metric, BROWSER_BUDGETS_MS["reference-mac"][metric] + 1, "reference-mac");
+      expect(over.withinBudget).toBe(false);
+    }
+    expect(BROWSER_BUDGETS_MS["reference-mac"].coldOpen).toBe(1500);
+    expect(BROWSER_BUDGETS_MS["reference-mac"].typeInput).toBe(50);
+    expect(BROWSER_BUDGETS_MS["hosted-runner"].coldOpen).toBeGreaterThan(BROWSER_BUDGETS_MS["reference-mac"].coldOpen);
+    expect(() => evaluateBrowserGate("nope", 1, "reference-mac")).toThrow();
+  });
+
+  it("keeps the browser driver development-only", () => {
+    const manifest = JSON.parse(
+      readFileSync(join(HERE, "..", "..", "package.json"), "utf8")
+    ) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+    expect(manifest.devDependencies?.puppeteer).toBeDefined();
+    expect(manifest.dependencies?.puppeteer).toBeUndefined();
   });
 });

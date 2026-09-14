@@ -21,9 +21,10 @@ export const defaultHost = "127.0.0.1";
  */
 export const PRODUCTION_CSP = [
   "default-src 'self'",
-  // wasm-unsafe-eval admits WebAssembly compilation (KTD19) without
-  // permitting JavaScript evaluation; every other directive is unchanged.
-  "script-src 'self' wasm-unsafe-eval",
+  // 'wasm-unsafe-eval' admits WebAssembly compilation (KTD19) without
+  // permitting JavaScript evaluation; unquoted it parses as a host-source
+  // and silently grants nothing, so the quotes are load-bearing.
+  "script-src 'self' 'wasm-unsafe-eval'",
   "worker-src 'self'",
   "style-src 'self'",
   "img-src 'self' data: blob:",

@@ -1,6 +1,7 @@
 {
-  "generatedAt": "2026-09-05T11:46:31.117Z",
-  "commit": "8f886499dbf3a73b640751651643ea74f654ee46",
+  "generatedAt": "2026-09-14T07:34:02.101Z",
+  "commit": "5224f38711f93ec311c19df9f7a2e623859989ac",
+  "class": "local",
   "hardwareClass": {
     "arch": "arm64",
     "cpuModel": "Apple M4 Pro",
@@ -11,13 +12,44 @@
   "os": "darwin 25.6.0",
   "node": "v24.18.1",
   "qpdf": "12.4.1",
-  "ghostscript": "10.07.1",
+  "ghostscript": "10.08.0",
   "assetHashes": {
-    "PageEditor-BjuouNZ1.js": "f25fb4a59315dae3a614e810c2fcc5aa6daa5e08bee35edf04b5fab91574499f",
-    "index-BMs13Xav.js": "95150fcb02c82d1d081ba6180504ad5824252bd5cb64c61be85a3784aad8f23a",
-    "index-DcmutpAm.css": "2b049dbe0abfb6a7e69e3e3877d18a8faa9b96eab31fb198933b2e437b9a4c1e",
-    "pdf-CfP-JzcY.js": "dff80a0c8426633f5d859547e1055fd07b13b5c1a3e2f643f9715a1df4dd4f04",
-    "pdf.worker.min-Dswkl-cV.mjs": "8ab0e5e30031b4a06ecfddd5ae9562f0227f830ee7ec9ed1a968b134243d2386"
+    "FormFiller-jgn8JNbF.js": "937979bc4269ef38fa91062aecea4f414e4f1dd19842240541feffa1b85764c4",
+    "PageEditor-Ng68FfAN.js": "91f2f8567868167f1e204cb40b0d3271d996da7f1449c6325b6ea95ac7dcbcf5",
+    "index-CgX62bek.js": "cd30ead3a620c4a7176b22678c2b5f4ee93ec2c6aa87b88b20a9fa9423ed5643",
+    "index-DJZK9-uq.css": "40c719047b5191f141e3501d49c35f975f3aa271220b160eaf1817077ab417cd",
+    "pdf.min-DT0YZPLb.js": "9450e071a4ad58f9030896beaa63df5654e4167c1ecd9cab0cc9a85743ae6ccf",
+    "pdf.worker.min-Dswkl-cV.mjs": "8ab0e5e30031b4a06ecfddd5ae9562f0227f830ee7ec9ed1a968b134243d2386",
+    "pdfjs/iccs/CGATS001Compat-v2-micro.icc": "73e1ba37d2bad5bab2a964f40a9eed96209666efc067c3322626214bbef234a0",
+    "pdfjs/iccs/LICENSE": "286e4fd7b447330b2c88e23890e3cd0a9d38cb398d4a59cb247f578ccbda3213",
+    "pdfjs/standard_fonts/FoxitDingbats.pfb": "845c752392b6c914fb989c75a08b7792b88f542d2499042ef2889f8c814a16ed",
+    "pdfjs/standard_fonts/FoxitFixed.pfb": "b6c8fe53f134b8b6d4578cd2d544df4cee9624c4efa8d51a560fb40ea296101b",
+    "pdfjs/standard_fonts/FoxitFixedBold.pfb": "f1b7159702973f54fc86254ea38bcf3712b2a736eb3a0995751e9f4bb45ad603",
+    "pdfjs/standard_fonts/FoxitFixedBoldItalic.pfb": "8a000945843bd31add06aee63bf9fd41b7578b4f3242a4b7cd46349ad9d24d4d",
+    "pdfjs/standard_fonts/FoxitFixedItalic.pfb": "5007faf8320fa1fcc08b8894b356ad976f60b992ba29ee5272578bbdebaf3876",
+    "pdfjs/standard_fonts/FoxitSerif.pfb": "4f57d2b9d884af8f907bf22df6019b52d86cbf6214fdbd02b1ae05472a543f35",
+    "pdfjs/standard_fonts/FoxitSerifBold.pfb": "0bdf4b04e964139818d51eda03d566ba999fc3ba2421b1c6c51f9dc969022e80",
+    "pdfjs/standard_fonts/FoxitSerifBoldItalic.pfb": "a406cac82583bf98175cb62c87ed5e95c45fbb34eece63a10b0a13e793cb2e10",
+    "pdfjs/standard_fonts/FoxitSerifItalic.pfb": "610ae0687198045c4db5d1a6650fd5e92536631706382eb8b72e38df578d0ae9",
+    "pdfjs/standard_fonts/FoxitSymbol.pfb": "47967d055530e7357088a08403115425643ec2cdfd6201ba8af0fbd7116c1539",
+    "pdfjs/standard_fonts/LICENSE_FOXIT": "b578cdd2345840ada550bd12519533812320d5f1d21cf4c1c7e1b1b0a31c98b7",
+    "pdfjs/standard_fonts/LICENSE_LIBERATION": "d2c4d5b3e115a519cb58eb691aa64538397e2611f9ebe801392cf9667997e7dc",
+    "pdfjs/standard_fonts/LiberationSans-Bold.ttf": "361c61b82d575c5c35fd9157fda8b0194bcfcd0d88ea8521a4fb5dd53d33dddc",
+    "pdfjs/standard_fonts/LiberationSans-BoldItalic.ttf": "a224075ac17495ad0a3af3bc0a419ac0704a8b3fd1095456201fb9b095fc281d",
+    "pdfjs/standard_fonts/LiberationSans-Italic.ttf": "832b4406dbef23628800d3aaad21048534ac84d7e3ad955be83b8172ed8ef512",
+    "pdfjs/standard_fonts/LiberationSans-Regular.ttf": "f8ace1f892b2bd9dc1792ba7f097fa7588f84fed48321480e04de5390828221f",
+    "pdfjs/wasm/LICENSE_JBIG2": "9e66b7f1b934a28b37f3bc4dac97915de1674271e79a0a88182a18ed9731b4d1",
+    "pdfjs/wasm/LICENSE_OPENJPEG": "a6af136f3e15038a666b61f376612a07d9a4e48cb7c01adbf3e33b3f14ab49b6",
+    "pdfjs/wasm/LICENSE_PDFJS_JBIG2": "aad3cce09842e00e9e11ad5e8fef8cc02fbc3a3768fe2f007443b9cee37aaee5",
+    "pdfjs/wasm/LICENSE_PDFJS_OPENJPEG": "717fc62da03292dbb4dd0c8280bd4ce7bb8550dcf31d772bc93455fb50313425",
+    "pdfjs/wasm/LICENSE_PDFJS_QCMS": "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1",
+    "pdfjs/wasm/LICENSE_QCMS": "36d847ae882f6574ebc72f56a4f354e4f104fde4a584373496482e97d52d31bc",
+    "pdfjs/wasm/jbig2.wasm": "e6bee67724a7b5436fe8162638e3708cfc8d52b6342db69a49715e30ff27cfdc",
+    "pdfjs/wasm/jbig2_nowasm_fallback.js": "04c795a6657a4553a64b781ea3e85256203d913c3b71b72b85fa3ce00622f458",
+    "pdfjs/wasm/openjpeg.wasm": "004a0e62db930ba9ff2a22212f4554d0bb57a0635a8287caf70f98117cee14ba",
+    "pdfjs/wasm/openjpeg_nowasm_fallback.js": "0f998419819da4491d8302222aa9e2ff2494685641aa2a6c21c3760c29f3e319",
+    "pdfjs/wasm/qcms_bg.wasm": "663d86126d5f5fcb1c61490f94353e2a8375660b8c5498ab3ebab5a34b08800e",
+    "pdfjs-version-Fx00Y6NM.js": "351a81a71f91732ac95711010271b230cb5364adcb253d7b3a26f5f79106fea8"
   },
   "corpusHashes": {
     "corpus-20.pdf": "81d4bf2af235d519e83e0d794d160046aa3e6c8cf4431e4a299606bd14908af6",
@@ -28,38 +60,42 @@
     "warmups": 5,
     "samples": 20
   },
+  "owners": {
+    "baseline": "scripts/benchmark-page-editor.mjs",
+    "browser": "scripts/benchmark-browser.mjs (the browser section is preserved verbatim when present)"
+  },
   "results": {
     "corpus-20.pdf": {
       "inspect": {
         "operation": "core-inspect-corpus-20.pdf",
         "warmups": 5,
         "samples": 20,
-        "minMs": 9.52,
-        "medianMs": 9.84,
-        "p95Ms": 10.73,
-        "maxMs": 10.73
+        "minMs": 8.15,
+        "medianMs": 8.47,
+        "p95Ms": 9.17,
+        "maxMs": 9.17
       },
       "assemble": {
         "operation": "core-assemble-corpus-20.pdf",
         "warmups": 5,
         "samples": 20,
-        "minMs": 26.84,
-        "medianMs": 28.9,
-        "p95Ms": 33.42,
-        "maxMs": 33.42
+        "minMs": 22.69,
+        "medianMs": 23.33,
+        "p95Ms": 24.55,
+        "maxMs": 24.55
       },
       "directNative": {
         "operation": "direct-native-corpus-20.pdf",
         "warmups": 5,
         "samples": 20,
-        "minMs": 16.88,
-        "medianMs": 17.58,
-        "p95Ms": 18.34,
-        "maxMs": 18.34
+        "minMs": 13.74,
+        "medianMs": 14.5,
+        "p95Ms": 15.33,
+        "maxMs": 15.33
       },
       "sc5": {
-        "coreP95Ms": 33.42,
-        "nativeP95Ms": 18.34,
+        "coreP95Ms": 24.55,
+        "nativeP95Ms": 15.33,
         "budgetMs": 300,
         "withinSc5": true,
         "note": "SC5 gate: core assemble p95 within max(300ms, 20% beyond direct native pipeline p95)."
@@ -70,32 +106,32 @@
         "operation": "core-inspect-corpus-100.pdf",
         "warmups": 5,
         "samples": 20,
-        "minMs": 12.67,
-        "medianMs": 13.25,
-        "p95Ms": 15.44,
-        "maxMs": 15.44
+        "minMs": 10.35,
+        "medianMs": 11.6,
+        "p95Ms": 16.44,
+        "maxMs": 16.44
       },
       "assemble": {
         "operation": "core-assemble-corpus-100.pdf",
         "warmups": 5,
         "samples": 20,
-        "minMs": 33.46,
-        "medianMs": 34.6,
-        "p95Ms": 44.39,
-        "maxMs": 44.39
+        "minMs": 29.1,
+        "medianMs": 30.82,
+        "p95Ms": 34.9,
+        "maxMs": 34.9
       },
       "directNative": {
         "operation": "direct-native-corpus-100.pdf",
         "warmups": 5,
         "samples": 20,
-        "minMs": 23.82,
-        "medianMs": 24.83,
-        "p95Ms": 29.12,
-        "maxMs": 29.12
+        "minMs": 19.35,
+        "medianMs": 21.24,
+        "p95Ms": 32.45,
+        "maxMs": 32.45
       },
       "sc5": {
-        "coreP95Ms": 44.39,
-        "nativeP95Ms": 29.12,
+        "coreP95Ms": 34.9,
+        "nativeP95Ms": 32.45,
         "budgetMs": 300,
         "withinSc5": true,
         "note": "SC5 gate: core assemble p95 within max(300ms, 20% beyond direct native pipeline p95)."
@@ -105,10 +141,10 @@
         "warmups": 5,
         "samples": 20,
         "minMs": 0.02,
-        "medianMs": 0.02,
+        "medianMs": 0.03,
         "p95Ms": 0.04,
         "maxMs": 0.04,
-        "note": "Node-side manifest ops only; browser gesture p95 stays unverified (no real-browser driver)."
+        "note": "Node-side manifest ops; the browser p95 lives in the browser section (benchmark-browser.mjs)."
       },
       "cancellation": {
         "abortToRejectionMs": 0.21,
@@ -122,44 +158,136 @@
         "operation": "core-inspect-corpus-500.pdf",
         "warmups": 5,
         "samples": 20,
-        "minMs": 24.39,
-        "medianMs": 26.91,
-        "p95Ms": 28.9,
-        "maxMs": 28.9
+        "minMs": 20.87,
+        "medianMs": 23.29,
+        "p95Ms": 25.78,
+        "maxMs": 25.78
       },
       "assemble": {
         "operation": "core-assemble-corpus-500.pdf",
         "warmups": 5,
         "samples": 20,
-        "minMs": 70.79,
-        "medianMs": 74.06,
-        "p95Ms": 92.72,
-        "maxMs": 92.72
+        "minMs": 63.72,
+        "medianMs": 65.59,
+        "p95Ms": 67.32,
+        "maxMs": 67.32
       },
       "directNative": {
         "operation": "direct-native-corpus-500.pdf",
         "warmups": 5,
         "samples": 20,
-        "minMs": 60.28,
-        "medianMs": 61.6,
-        "p95Ms": 70.92,
-        "maxMs": 70.92
+        "minMs": 51.3,
+        "medianMs": 52.54,
+        "p95Ms": 61.54,
+        "maxMs": 61.54
       },
       "sc5": {
-        "coreP95Ms": 92.72,
-        "nativeP95Ms": 70.92,
+        "coreP95Ms": 67.32,
+        "nativeP95Ms": 61.54,
         "budgetMs": 300,
         "withinSc5": true,
         "note": "SC5 gate: core assemble p95 within max(300ms, 20% beyond direct native pipeline p95)."
       }
     }
   },
+  "browser": {
+    "generatedAt": "2026-09-14T07:30:56.981Z",
+    "commit": "5224f38711f93ec311c19df9f7a2e623859989ac",
+    "class": "local",
+    "hardwareClass": {
+      "arch": "arm64",
+      "cpuModel": "Apple M4 Pro",
+      "cpuCount": 14,
+      "memoryGb": 24,
+      "note": "Class only; no serial number, UUID, hostname, or account name recorded."
+    },
+    "os": "darwin 25.6.0",
+    "node": "v24.18.1",
+    "qpdf": "12.4.1",
+    "ghostscript": "10.08.0",
+    "assetHashes": {
+      "FormFiller-jgn8JNbF.js": "937979bc4269ef38fa91062aecea4f414e4f1dd19842240541feffa1b85764c4",
+      "PageEditor-Ng68FfAN.js": "91f2f8567868167f1e204cb40b0d3271d996da7f1449c6325b6ea95ac7dcbcf5",
+      "index-CgX62bek.js": "cd30ead3a620c4a7176b22678c2b5f4ee93ec2c6aa87b88b20a9fa9423ed5643",
+      "index-DJZK9-uq.css": "40c719047b5191f141e3501d49c35f975f3aa271220b160eaf1817077ab417cd",
+      "pdf.min-DT0YZPLb.js": "9450e071a4ad58f9030896beaa63df5654e4167c1ecd9cab0cc9a85743ae6ccf",
+      "pdf.worker.min-Dswkl-cV.mjs": "8ab0e5e30031b4a06ecfddd5ae9562f0227f830ee7ec9ed1a968b134243d2386",
+      "pdfjs/iccs/CGATS001Compat-v2-micro.icc": "73e1ba37d2bad5bab2a964f40a9eed96209666efc067c3322626214bbef234a0",
+      "pdfjs/iccs/LICENSE": "286e4fd7b447330b2c88e23890e3cd0a9d38cb398d4a59cb247f578ccbda3213",
+      "pdfjs/standard_fonts/FoxitDingbats.pfb": "845c752392b6c914fb989c75a08b7792b88f542d2499042ef2889f8c814a16ed",
+      "pdfjs/standard_fonts/FoxitFixed.pfb": "b6c8fe53f134b8b6d4578cd2d544df4cee9624c4efa8d51a560fb40ea296101b",
+      "pdfjs/standard_fonts/FoxitFixedBold.pfb": "f1b7159702973f54fc86254ea38bcf3712b2a736eb3a0995751e9f4bb45ad603",
+      "pdfjs/standard_fonts/FoxitFixedBoldItalic.pfb": "8a000945843bd31add06aee63bf9fd41b7578b4f3242a4b7cd46349ad9d24d4d",
+      "pdfjs/standard_fonts/FoxitFixedItalic.pfb": "5007faf8320fa1fcc08b8894b356ad976f60b992ba29ee5272578bbdebaf3876",
+      "pdfjs/standard_fonts/FoxitSerif.pfb": "4f57d2b9d884af8f907bf22df6019b52d86cbf6214fdbd02b1ae05472a543f35",
+      "pdfjs/standard_fonts/FoxitSerifBold.pfb": "0bdf4b04e964139818d51eda03d566ba999fc3ba2421b1c6c51f9dc969022e80",
+      "pdfjs/standard_fonts/FoxitSerifBoldItalic.pfb": "a406cac82583bf98175cb62c87ed5e95c45fbb34eece63a10b0a13e793cb2e10",
+      "pdfjs/standard_fonts/FoxitSerifItalic.pfb": "610ae0687198045c4db5d1a6650fd5e92536631706382eb8b72e38df578d0ae9",
+      "pdfjs/standard_fonts/FoxitSymbol.pfb": "47967d055530e7357088a08403115425643ec2cdfd6201ba8af0fbd7116c1539",
+      "pdfjs/standard_fonts/LICENSE_FOXIT": "b578cdd2345840ada550bd12519533812320d5f1d21cf4c1c7e1b1b0a31c98b7",
+      "pdfjs/standard_fonts/LICENSE_LIBERATION": "d2c4d5b3e115a519cb58eb691aa64538397e2611f9ebe801392cf9667997e7dc",
+      "pdfjs/standard_fonts/LiberationSans-Bold.ttf": "361c61b82d575c5c35fd9157fda8b0194bcfcd0d88ea8521a4fb5dd53d33dddc",
+      "pdfjs/standard_fonts/LiberationSans-BoldItalic.ttf": "a224075ac17495ad0a3af3bc0a419ac0704a8b3fd1095456201fb9b095fc281d",
+      "pdfjs/standard_fonts/LiberationSans-Italic.ttf": "832b4406dbef23628800d3aaad21048534ac84d7e3ad955be83b8172ed8ef512",
+      "pdfjs/standard_fonts/LiberationSans-Regular.ttf": "f8ace1f892b2bd9dc1792ba7f097fa7588f84fed48321480e04de5390828221f",
+      "pdfjs/wasm/LICENSE_JBIG2": "9e66b7f1b934a28b37f3bc4dac97915de1674271e79a0a88182a18ed9731b4d1",
+      "pdfjs/wasm/LICENSE_OPENJPEG": "a6af136f3e15038a666b61f376612a07d9a4e48cb7c01adbf3e33b3f14ab49b6",
+      "pdfjs/wasm/LICENSE_PDFJS_JBIG2": "aad3cce09842e00e9e11ad5e8fef8cc02fbc3a3768fe2f007443b9cee37aaee5",
+      "pdfjs/wasm/LICENSE_PDFJS_OPENJPEG": "717fc62da03292dbb4dd0c8280bd4ce7bb8550dcf31d772bc93455fb50313425",
+      "pdfjs/wasm/LICENSE_PDFJS_QCMS": "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1",
+      "pdfjs/wasm/LICENSE_QCMS": "36d847ae882f6574ebc72f56a4f354e4f104fde4a584373496482e97d52d31bc",
+      "pdfjs/wasm/jbig2.wasm": "e6bee67724a7b5436fe8162638e3708cfc8d52b6342db69a49715e30ff27cfdc",
+      "pdfjs/wasm/jbig2_nowasm_fallback.js": "04c795a6657a4553a64b781ea3e85256203d913c3b71b72b85fa3ce00622f458",
+      "pdfjs/wasm/openjpeg.wasm": "004a0e62db930ba9ff2a22212f4554d0bb57a0635a8287caf70f98117cee14ba",
+      "pdfjs/wasm/openjpeg_nowasm_fallback.js": "0f998419819da4491d8302222aa9e2ff2494685641aa2a6c21c3760c29f3e319",
+      "pdfjs/wasm/qcms_bg.wasm": "663d86126d5f5fcb1c61490f94353e2a8375660b8c5498ab3ebab5a34b08800e",
+      "pdfjs-version-Fx00Y6NM.js": "351a81a71f91732ac95711010271b230cb5364adcb253d7b3a26f5f79106fea8"
+    },
+    "chrome": "Chrome/152.0.7977.54",
+    "puppeteer": "25.9.0",
+    "budgetClass": "reference-mac",
+    "corpusHashes": {
+      "corpus-20.pdf": "81d4bf2af235d519e83e0d794d160046aa3e6c8cf4431e4a299606bd14908af6",
+      "corpus-100.pdf": "edaf586b78f2ab7919fda0aafb9d2f4c70cec18af81ff1028dcb840e446996ac",
+      "corpus-500.pdf": "3d7c907d66ff57c28eaf4f784802a6f5778bc2d35d721be005c7b107df65eeb9"
+    },
+    "results": {
+      "coldOpen": {
+        "operation": "cold-open-page-editor-corpus-20",
+        "samples": 10,
+        "minMs": 157.61,
+        "medianMs": 169.92,
+        "p95Ms": 178.55,
+        "maxMs": 178.55,
+        "gate": {
+          "metric": "coldOpen",
+          "p95Ms": 178.55,
+          "budgetMs": 1500,
+          "budgetName": "reference-mac",
+          "withinBudget": true
+        }
+      },
+      "rotateGesture": {
+        "operation": "rotate-selected-100-thumbs",
+        "samples": 20,
+        "minMs": 1,
+        "medianMs": 1.3,
+        "p95Ms": 3,
+        "maxMs": 3
+      },
+      "exportToDownloadable": {
+        "operation": "export-to-downloadable-corpus-20",
+        "samples": 8,
+        "minMs": 0,
+        "medianMs": 0,
+        "p95Ms": 54.1,
+        "maxMs": 54.1
+      }
+    }
+  },
   "unverified": [
-    "SC3 cold first-thumbnail time: needs a real-browser driver against the built app; not measured here.",
-    "SC4 browser gesture p95: node manifest-op latency is measured above; browser p95 stays unverified.",
-    "SC5 browser-to-downloadable overhead: needs a real-browser driver; not measured here.",
     "SC7 in-flight cancellation (500ms signal / 2s group termination / 2s cleanup): only the pre-start abort path is timed here.",
-    "SC8 100 MiB streaming RSS: needs an isolated harness; not measured here."
+    "SC8 100 MiB streaming RSS: needs an isolated memory harness the browser driver does not provide; not measured."
   ],
   "corpusLicense": "Generated synthetic fixtures (no private data); safe to redistribute."
 }

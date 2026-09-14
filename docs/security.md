@@ -19,7 +19,14 @@ transfer, and consumed after the first completed download.
   storage.
 - Validation rejects non-PDF files, encrypted PDFs, signed PDFs, and
   active content (JavaScript, open/additional/launch actions,
-  submit/import, rich media, embedded files) before any mutation.
+  submit/import, rich media, embedded files) before any mutation on the
+  compression and page-export paths.
+- Form filling is narrower and more permissive by design: a document that
+  opens with an empty password is decrypted first, field-bound actions are
+  admissible and stripped from the delivered file, and catalog-scoped
+  active content, XFA and modification signatures still refuse. Values
+  reach a document only through an approved plan bound to a single-use
+  receipt; the delivered output is unencrypted.
 - Compression and page-export errors return local error codes rather than
   partial success; no partial output is downloadable.
 
@@ -30,7 +37,9 @@ argument arrays (no shell), closed stdin, a minimal environment, and
 process-group termination.
 
 - `qpdf` (>= 12.4.1, required) performs inspection and the single
-  page-selection assembly mutation per export.
+  page-selection assembly mutation per export. Form filling is a separate
+  pipeline with its own bounded passes: admission, appearance generation
+  and rewrite, revision collapse, and strict validation.
 - Ghostscript (>= 10.07.1, optional) creates post-assembly compression
   candidates that only win when smaller and valid.
 - OCRmyPDF (>= 17.0.0, optional) and Tesseract add a searchable text layer.

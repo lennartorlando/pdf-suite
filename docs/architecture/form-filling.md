@@ -90,7 +90,12 @@ file.
 - Bundle budgets SC1/SC2 are enforced by `scripts/check-editor-bundle.mjs`;
   the fill surface is a lazy chunk and its renderer WebAssembly modules are
   discovered into the lazy budget.
-- Fill timing and browser criteria (core fill p95, cold open to first
-  editable field, input latency) belong to the shared measurement harness
-  of the plan's evidence unit; no recorded form-fill baseline exists yet
-  and none is asserted here.
+- Fill timing is measured by `scripts/benchmark-form-filling.mjs` into
+  `docs/benchmarks/form-filling-baseline.json` (SC5: the 100-field core
+  fill plus readback p95). Browser criteria (SC3 cold open, SC4 input
+  latency, the scanned-page render under the production content policy)
+  are measured by `scripts/benchmark-browser.mjs` into the same baseline's
+  `browser` section. Both run on the shared harness of
+  `scripts/benchmark-harness.mjs`; every recorded number carries the
+  environment that produced it, and hosted-runner results use a separate
+  regression budget that can never satisfy the reference-Mac criteria.

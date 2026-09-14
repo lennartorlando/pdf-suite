@@ -63,6 +63,9 @@ export function pdfjsAssetUrls(base: string = document.baseURI): {
  * Document parameters for the fill surface: the child-process safety flags
  * plus the local asset configuration. `isEvalSupported` is honored by the
  * runtime though absent from the declared parameter type.
+ * `useWorkerFetch` must be set explicitly: without `cMapUrl` the runtime
+ * default resolves to false, which disables worker-side fetches entirely
+ * and turns qcms into dead configuration.
  */
 export function formDocumentParams(data: Uint8Array): Record<string, unknown> {
   return {
@@ -70,6 +73,7 @@ export function formDocumentParams(data: Uint8Array): Record<string, unknown> {
     isEvalSupported: false,
     enableScripting: false,
     useSystemFonts: false,
+    useWorkerFetch: true,
     isImageDecoderSupported: false,
     disableAutoFetch: true,
     ...pdfjsAssetUrls()

@@ -19,11 +19,14 @@
     "check:editor-bundle": "node scripts/check-editor-bundle.mjs",
     "check:native-versions": "node scripts/check-native-versions.mjs",
     "benchmark:page-editor": "node scripts/benchmark-page-editor.mjs",
+    "benchmark:form-filling": "node scripts/benchmark-form-filling.mjs",
+    "benchmark:browser": "node scripts/benchmark-browser.mjs",
     "verify": "npm run typecheck && npm test && npm run test:integration && npm run build && npm run check:editor-bundle && npm run check:native-versions"
   },
   "devDependencies": {
     "@types/node": "^22.13.14",
     "jsdom": "^26.0.0",
+    "puppeteer": "25.9.0",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",
     "vite": "^6.2.2",

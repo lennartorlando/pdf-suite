@@ -200,11 +200,13 @@ describe("fill surface: lazy boundary and CSP", () => {
     const serverSource = readFileSync("apps/local-server/src/server.ts", "utf8");
     const block = serverSource.match(/PRODUCTION_CSP = \[([\s\S]*?)\]\.join/)?.[1] ?? "";
     const directives = [...block.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
-    expect(directives).toContain("script-src 'self' wasm-unsafe-eval");
+    expect(directives).toContain("script-src 'self' 'wasm-unsafe-eval'");
     // No other directive may carry eval permissions and no directive besides
-    // script-src mentions wasm-unsafe-eval.
+    // script-src mentions wasm-unsafe-eval. The keyword is a quoted
+    // source-expression: unquoted it parses as a host-source and grants
+    // nothing.
     expect(directives.filter((d) => d.includes("wasm-unsafe-eval"))).toHaveLength(1);
-    expect(directives.some((d) => d.includes("unsafe-eval'") || d.includes("'unsafe-eval"))).toBe(false);
+    expect(directives.some((d) => d.includes("'unsafe-eval'"))).toBe(false);
     expect(directives).toContain("worker-src 'self'");
     expect(directives).toContain("connect-src 'self'");
     expect(directives).toContain("object-src 'none'");

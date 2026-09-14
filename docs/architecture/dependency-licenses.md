@@ -15,9 +15,15 @@ The project starts with AGPL-3.0-or-later to keep the repository compatible with
 
 | Package | Version | Purpose | License |
 |---|---|---|---|
-| `pdfjs-dist` | 6.3.289 (exact pin) | Lazy local thumbnail rendering with a version-matched worker, plus the bounded fill child that writes filled/signed documents in Node; declared in both the core and web manifests (~35 MB unpacked) | Apache-2.0 |
+| `pdfjs-dist` | 6.3.289 (exact pin) | Lazy local thumbnail and form-page rendering with a version-matched worker, plus the bounded fill child that writes filled/signed documents in Node; its `wasm`, `standard_fonts` and `iccs` renderer assets are emitted into the web bundle and served from the app's own origin (KTD19); declared in both the core and web manifests (~35 MB unpacked) | Apache-2.0 |
 | `@napi-rs/canvas` | 1.0.8 (transitive) | Optional `pdfjs-dist` native canvas dependency, resolved in the lockfile with platform binaries; unused by the Node fill child, which has no canvas — image stamping is deferred | MIT |
-| `@fastify/busboy` | 3.2.2 (exact pin) | Streaming multipart parser for the page-export route; no file-sized buffers | MIT |
+| `@fastify/busboy` | 3.2.2 (exact pin) | Streaming multipart parser for the page-export and form routes; no file-sized buffers | MIT |
+
+## Development-Only Dependencies
+
+| Package | Version | Purpose | License |
+|---|---|---|---|
+| `puppeteer` | 25.9.0 | Browser driver for `scripts/benchmark-browser.mjs`: the sole new dependency the form-filling feature permits, development-only; never shipped or referenced by runtime code | Apache-2.0 |
 
 ## Current Distribution Decision
 

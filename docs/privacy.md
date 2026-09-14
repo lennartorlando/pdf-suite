@@ -11,7 +11,7 @@ PDF Compressor is local-first.
 
 ## Temporary Files
 
-Compression, page-export, and OCR jobs use isolated temporary directories.
+Compression, page-export, OCR, and form-fill jobs use isolated temporary directories.
 
 - The local server streams each uploaded source once into a private
   per-job workspace and never buffers complete multipart uploads in memory.
@@ -24,6 +24,23 @@ Compression, page-export, and OCR jobs use isolated temporary directories.
 - A session-bound output survives interrupted downloads for one retry but
   is consumed after the first completed download, explicit discard, or a
   short TTL (10 minutes). Cancelled and failed jobs remove their workspace.
+
+## Form-Fill Artifacts
+
+The fill loop's durable state holds the values a person approved, so it is
+treated as personal data:
+
+- The plan file, its `.receipt.json` approval receipt, its `.audit.json`
+  record, and the decrypted working copy inside a job workspace are written
+  owner-readable only (mode 0600).
+- `pdf-compressor forms clean <plan.json>` removes the plan, receipt and
+  audit files; the per-user nonce ledger under
+  `~/.pdf-compressor/fill-ledger` is deliberately kept so a spent approval
+  stays spent.
+- Command output digests field values by default; `--reveal-values` opts
+  back into verbatim values.
+- A form document that opens with an empty password is decrypted for
+  filling and the filled output is delivered unencrypted.
 
 ## What Is Not Collected
 
@@ -38,8 +55,13 @@ Compression, page-export, and OCR jobs use isolated temporary directories.
   or Ghostscript (>= 10.07.1, optional for compression), and OCRmyPDF >= 17
   with the selected Tesseract languages (optional for OCR), must be installed
   on the user's machine until binary distribution is decided.
-- Password-protected, signed, and active-content PDFs are rejected rather
-  than decrypted, repaired, or sanitized.
-- Page assembly may not preserve forms, bookmarks, tags, or custom page
-  labels; these surface as compatibility warnings.
+- Compression and page export reject password-protected, signed, and
+  active-content PDFs rather than decrypting, repairing, or sanitizing
+  them. Form filling admits a document that opens with an empty password
+  (it is decrypted and delivered unencrypted) and strips field-level
+  actions from the delivered file; catalog-scoped active content, XFA and
+  modification-signed documents stay refused everywhere.
+- Page assembly preserves form fields and their values (verified against
+  the supported qpdf floor); bookmarks, tags, and custom page labels may
+  not survive and surface as compatibility warnings.
 - Desktop packaging is deferred.

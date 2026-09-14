@@ -38,3 +38,10 @@ jobs:
       - run: npm run check:editor-bundle
       - run: npm run check:native-versions
       - run: npm run benchmark:page-editor
+      # Hosted-runner regression budgets only; reference-Mac evidence is
+      # produced on the reference machine. The browser driver is the one
+      # permitted development-only dependency; `browsers install` is its own
+      # provisioner, not a second package.
+      - run: npm run benchmark:form-filling
+      - run: npx puppeteer browsers install chrome
+      - run: npm run benchmark:browser

@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 /**
- * U6 reproducible benchmark harness (SC5 plus honest SC4/SC7 probes).
+ * U6 reproducible benchmark (SC5 plus honest SC4/SC7 probes), now a thin
+ * operation definition over the shared harness of KTD16
+ * (scripts/benchmark-harness.mjs). This script owns the `results` section
+ * of docs/benchmarks/page-editor-baseline.json; the `browser` section is
+ * owned by scripts/benchmark-browser.mjs and preserved verbatim here.
  *
  * Corpora: deterministic, generated, redistributable synthetic PDFs
  * (tests/performance/corpus-{20,100,500}.pdf). Each page carries a distinct
@@ -14,36 +18,40 @@
  * latency, cancellation/cleanup timing. Recorded honestly: commit (read
  * from .git/HEAD or a worktree .git pointer, never via git), hardware
  * class without private identifiers, OS, Node, qpdf/Ghostscript versions,
- * production asset hashes, corpus hashes.
+ * environment class, production asset hashes, corpus hashes.
  *
- * Explicitly NOT measured here (no real-browser driver installed, no
- * fabricated evidence): SC3 cold first-thumbnail browser time, browser
- * gesture p95, SC8 100 MiB streaming RSS. Those stay `unverified` in the
- * baseline and in docs. This script exits nonzero when any measured gate
- * (SC5 p95 overhead, or --max-assemble-p95-ms when provided) is exceeded.
+ * Browser criteria are measured by scripts/benchmark-browser.mjs into the
+ * `browser` section of the same baseline. What stays `unverified`: the
+ * criteria no installed harness can reach yet (SC7 in-flight cancellation,
+ * SC8 streaming RSS). This script exits nonzero when any measured gate
+ * (SC5 p95 overhead, or --max-assemble-p95-ms when provided) is exceeded,
+ * or when the on-disk corpora no longer match the recorded hashes without
+ * --regen-corpora.
  */
-import { execFile } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync
-} from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname, resolve } from "node:path";
-import { arch, cpus, totalmem, platform, release } from "node:os";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import {
+  DEFAULT_SAMPLES,
+  DEFAULT_WARMUPS,
+  BENCHMARK_DIR,
+  PERF_DIR,
+  checkCorpusMatch,
+  collectAssetHashes,
+  collectEnvironment,
+  execCapture,
+  hashCorpusFiles,
+  hasFlag,
+  invokedDirectly,
+  measure,
+  readBaseline,
+  writeBaseline
+} from "./benchmark-harness.mjs";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const PERF_DIR = join(ROOT, "tests", "performance");
-const BASELINE_PATH = join(ROOT, "docs", "benchmarks", "page-editor-baseline.json");
-const WARMUPS = 5;
-const SAMPLES = 20;
+const BASELINE_PATH = join(BENCHMARK_DIR, "page-editor-baseline.json");
+const WARMUPS = DEFAULT_WARMUPS;
+const SAMPLES = DEFAULT_SAMPLES;
 
 /* --- pure SC5 gate (exported for tests; p95 compared, never medians) --- */
 
@@ -105,7 +113,7 @@ function buildPdf(pageCount, labelPrefix) {
   return Buffer.from(parts.join("") + xref.join("") + `trailer\n<< /Size ${maxId + 1} /Root ${catalogId} 0 R >>\nstartxref\n${startxref}\n%%EOF\n`, "latin1");
 }
 
-function ensureCorpora(regen) {
+export function ensurePageEditorCorpora(regen) {
   mkdirSync(PERF_DIR, { recursive: true });
   const specs = [
     ["corpus-20.pdf", 20],
@@ -119,95 +127,9 @@ function ensureCorpora(regen) {
   return specs.map(([name]) => join(PERF_DIR, name));
 }
 
-/* --- helpers --- */
+/* --- helpers shared through benchmark-harness.mjs (re-exported for tests) --- */
 
-function sha256(path) {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
-}
-
-/** Resolve the git dir: a normal `.git` directory or a worktree `.git` pointer file. */
-export function resolveGitDir(root) {
-  const dotGit = join(root, ".git");
-  let st;
-  try {
-    st = statSync(dotGit);
-  } catch {
-    return null;
-  }
-  if (st.isDirectory()) return dotGit;
-  if (st.isFile()) {
-    try {
-      const pointer = readFileSync(dotGit, "utf8").trim();
-      const match = /^gitdir:\s*(.+)$/.exec(pointer);
-      if (match) return resolve(root, match[1]);
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-export function readCommit(root = ROOT) {
-  try {
-    const gitDir = resolveGitDir(root);
-    if (!gitDir) return "unknown (detached workspace; host owns the base commit)";
-    const head = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
-    const match = /^ref: (.+)$/.exec(head);
-    if (match) return readFileSync(join(gitDir, match[1]), "utf8").trim();
-    return head;
-  } catch {
-    return "unknown (detached workspace; host owns the base commit)";
-  }
-}
-
-function execCapture(command, args, timeoutMs = 120000) {
-  return new Promise((resolve, reject) => {
-    execFile(command, args, { maxBuffer: 64 * 1024 * 1024, timeout: timeoutMs }, (error, stdout, stderr) => {
-      if (error) {
-        reject(Object.assign(new Error(`${command} failed`), { stderr: String(stderr) }));
-        return;
-      }
-      resolve({ stdout: String(stdout), stderr: String(stderr) });
-    });
-  });
-}
-
-async function qpdfVersion() {
-  const { stdout } = await execCapture("qpdf", ["--version"]);
-  return (/qpdf version (\d+\.\d+\.\d+)/.exec(stdout) ?? [])[1] ?? "unknown";
-}
-
-async function gsVersion() {
-  try {
-    const { stdout } = await execCapture("gs", ["--version"]);
-    return stdout.split("\n")[0].trim() || "absent";
-  } catch {
-    return "absent";
-  }
-}
-
-function stats(samples) {
-  const sorted = [...samples].sort((a, b) => a - b);
-  const at = (q) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
-  return {
-    samples: sorted.length,
-    minMs: +sorted[0].toFixed(2),
-    medianMs: +at(0.5).toFixed(2),
-    p95Ms: +at(0.95).toFixed(2),
-    maxMs: +sorted[sorted.length - 1].toFixed(2)
-  };
-}
-
-async function measure(fn, label) {
-  for (let i = 0; i < WARMUPS; i += 1) await fn();
-  const samples = [];
-  for (let i = 0; i < SAMPLES; i += 1) {
-    const start = performance.now();
-    await fn();
-    samples.push(performance.now() - start);
-  }
-  return { operation: label, warmups: WARMUPS, ...stats(samples) };
-}
+export { readCommit, resolveGitDir } from "./benchmark-harness.mjs";
 
 /**
  * Output-position rotation ranges for the direct native pipeline, mirroring
@@ -235,23 +157,30 @@ export function parseMaxAssembleP95(argv) {
   return null;
 }
 
-const invokedDirectly = process.argv[1] === fileURLToPath(import.meta.url);
-if (invokedDirectly) {
-  const regen = process.argv.includes("--regen-corpora");
+if (invokedDirectly(import.meta.url)) {
+  const regen = hasFlag(process.argv, "--regen-corpora");
   const maxAssembleP95 = parseMaxAssembleP95(process.argv);
-  const corpora = ensureCorpora(regen);
+  const corpora = ensurePageEditorCorpora(regen);
 
   /* Dynamic imports of the built core (benchmark runs after `npm run build`). */
   const core = await import("../packages/core/dist/index.js");
   const manifestMod = await import("../packages/core/dist/page-manifest.js");
 
-  const corpusHashes = Object.fromEntries(corpora.map((p) => [p.split("/").pop(), sha256(p)]));
+  const corpusHashes = hashCorpusFiles(corpora);
+  const prior = readBaseline(BASELINE_PATH);
+  if (!regen && prior?.corpusHashes) {
+    const match = checkCorpusMatch(prior.corpusHashes, corpusHashes);
+    if (!match.ok) {
+      console.error(
+        `benchmark-page-editor: FAIL: corpus hashes changed (${match.mismatched.join(", ")}); ` +
+          "regenerate with --regen-corpora if the change is intentional."
+      );
+      process.exit(1);
+    }
+  }
 
-  const assetDir = join(ROOT, "apps", "web", "dist", "assets");
-  const assetHashes = {};
-  try {
-    for (const f of readdirSync(assetDir)) assetHashes[f] = sha256(join(assetDir, f));
-  } catch {
+  const assetHashes = collectAssetHashes();
+  if (Object.keys(assetHashes).length === 0) {
     console.error("benchmark-page-editor: FAIL: apps/web/dist is missing; run `npm run build` first.");
     process.exit(1);
   }
@@ -335,7 +264,7 @@ if (invokedDirectly) {
             pages[9] = { ...pages[9], rotate: 90 };
             pages.splice(19, 1);
           }, "gesture-100-page-manifest-node");
-          entry.gesture = { ...gesture, note: "Node-side manifest ops only; browser gesture p95 stays unverified (no real-browser driver)." };
+          entry.gesture = { ...gesture, note: "Node-side manifest ops; the browser p95 lives in the browser section (benchmark-browser.mjs)." };
 
           // Cancellation/cleanup timing: abort before start must fail fast with no residue.
           const controller = new AbortController();
@@ -369,40 +298,33 @@ if (invokedDirectly) {
     for (const dir of scratchDirs) rmSync(dir, { recursive: true, force: true });
   }
 
-  const cpuList = cpus();
+  const environment = await collectEnvironment();
   const baseline = {
-    generatedAt: new Date().toISOString(),
-    commit: readCommit(),
-    hardwareClass: {
-      arch: arch(),
-      cpuModel: cpuList[0]?.model ?? "unknown",
-      cpuCount: cpuList.length,
-      memoryGb: Math.round(totalmem() / 1024 ** 3),
-      note: "Class only; no serial number, UUID, hostname, or account name recorded."
-    },
-    os: `${platform()} ${release()}`,
-    node: process.version,
-    qpdf: await qpdfVersion(),
-    ghostscript: await gsVersion(),
+    ...environment,
     assetHashes,
     corpusHashes,
     method: { warmups: WARMUPS, samples: SAMPLES },
+    owners: {
+      baseline: "scripts/benchmark-page-editor.mjs",
+      browser: "scripts/benchmark-browser.mjs (the browser section is preserved verbatim when present)"
+    },
     results,
+    // The browser section is owned by benchmark-browser.mjs; preserve it so
+    // this run never silently deletes recorded browser evidence.
+    ...(prior?.browser !== undefined ? { browser: prior.browser } : {}),
     unverified: [
-      "SC3 cold first-thumbnail time: needs a real-browser driver against the built app; not measured here.",
-      "SC4 browser gesture p95: node manifest-op latency is measured above; browser p95 stays unverified.",
-      "SC5 browser-to-downloadable overhead: needs a real-browser driver; not measured here.",
       "SC7 in-flight cancellation (500ms signal / 2s group termination / 2s cleanup): only the pre-start abort path is timed here.",
-      "SC8 100 MiB streaming RSS: needs an isolated harness; not measured here."
+      "SC8 100 MiB streaming RSS: needs an isolated memory harness the browser driver does not provide; not measured."
     ],
     corpusLicense: "Generated synthetic fixtures (no private data); safe to redistribute."
   };
 
-  mkdirSync(join(ROOT, "docs", "benchmarks"), { recursive: true });
-  writeFileSync(BASELINE_PATH, JSON.stringify(baseline, null, 2) + "\n");
+  writeBaseline(BASELINE_PATH, baseline);
 
   let failed = false;
-  console.log(`benchmark-page-editor: qpdf ${baseline.qpdf}, gs ${baseline.ghostscript}, node ${baseline.node}`);
+  console.log(
+    `benchmark-page-editor: ${environment.class} (${environment.os}, ${environment.hardwareClass.cpuModel}), qpdf ${environment.qpdf}, gs ${environment.ghostscript}, node ${environment.node}`
+  );
   for (const [name, entry] of Object.entries(results)) {
     console.log(`  ${name}: inspect p95 ${entry.inspect.p95Ms}ms, assemble p95 ${entry.assemble.p95Ms}ms, native p95 ${entry.directNative.p95Ms}ms, SC5 ${entry.sc5.withinSc5 ? "within" : "OVER"} budget (p95 vs budget ${entry.sc5.budgetMs}ms)`);
     if (!entry.sc5.withinSc5) failed = true;
@@ -410,7 +332,7 @@ if (invokedDirectly) {
       console.error(`  ${name}: FAIL: assemble p95 ${entry.assemble.p95Ms}ms exceeds --max-assemble-p95-ms=${maxAssembleP95}ms.`);
       failed = true;
     }
-    if (entry.gesture) console.log(`  gesture-100: p95 ${entry.gesture.p95Ms}ms (node manifest ops; browser p95 unverified)`);
+    if (entry.gesture) console.log(`  gesture-100: p95 ${entry.gesture.p95Ms}ms (node manifest ops; browser p95 in the browser section)`);
     if (entry.cancellation) console.log(`  cancellation: ${entry.cancellation.abortToRejectionMs}ms -> ${entry.cancellation.code}`);
   }
   console.log(`benchmark-page-editor: wrote ${BASELINE_PATH}`);

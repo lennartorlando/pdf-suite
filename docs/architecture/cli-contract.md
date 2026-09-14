@@ -1,8 +1,8 @@
 # CLI Contract
 
-The CLI exposes the same shared compression, page, and OCR core used by the local web app.
-`inspect`, `assemble`, and `ocr` call shared core primitives directly. The CLI adds no validation, inspection, OCR, or assembly
-behavior of its own and no orchestration layer.
+The CLI exposes the same shared compression, page, OCR, and form-filling core used by the local web app.
+`inspect`, `assemble`, `ocr`, and `forms` call shared core primitives directly. The CLI adds no validation, inspection, OCR, assembly, or fill
+behavior of its own and no orchestration layer beyond the approval gate described below.
 
 ## Commands
 
@@ -116,10 +116,10 @@ approved. Field values never appear on stdout by default: `fields` reports
   write begins. Without a receipt the command mints one interactively after
   rendering every approved value, the resolved destination, the overwrite and
   burn-in decisions and the entry count; in a non-interactive context it
-  refuses with `FILL_RECEIPT_REQUIRED`. A plan, receipt and audit record are
-  written beside the plan file; the audit binds the digests, the receipt
-  identifier, the approval channel, the resolved qpdf path and version, and
-  the outcome.
+  refuses with `FILL_RECEIPT_REQUIRED`. The minted receipt and an audit
+  record are written beside the plan file, owner-readable only; the audit
+  binds the digests, the receipt identifier, the approval channel, the
+  resolved qpdf path and version, and the outcome.
 - `verify <output.pdf> --plan <plan.json>` independently reads the delivered
   artifact back and proves every approved entry — field values and appearance
   states on interactive artifacts, burned-in page content otherwise. A

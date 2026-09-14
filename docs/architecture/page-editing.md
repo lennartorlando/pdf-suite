@@ -34,7 +34,8 @@ when OCR is selected so recognition quality and the searchable layer stay intact
   clearly instead of returning an unrecognized PDF.
 - Blocked inputs fail closed: encrypted, signed, JavaScript, open or
   additional actions, launch, submit/import, rich media, embedded files.
-- Inert structures (forms, bookmarks, tags, page labels) surface as
+- Forms survive assembly with fields and values intact (verified against
+  the supported qpdf floor); bookmarks, tags, and page labels surface as
   compatibility warnings without preservation claims.
 - Upload, output, page-count, runtime, storage, and concurrency caps live
   in `apps/local-server/src/jobs.ts` (`LIMITS`).
@@ -51,9 +52,12 @@ when OCR is selected so recognition quality and the searchable layer stay intact
   gate always runs after the core build/typecheck and fails clearly when
   the core has not been built.
 - Reproducible measurements in `docs/benchmarks/page-editor-baseline.json`
-  via `scripts/benchmark-page-editor.mjs`. SC5 compares core assemble p95
+  via `scripts/benchmark-page-editor.mjs` on the shared harness
+  (`scripts/benchmark-harness.mjs`). SC5 compares core assemble p95
   against max(300ms, 20% beyond the equivalent direct native pipeline p95)
-  and exits nonzero when exceeded. Browser-only criteria
-  (SC3, browser gesture p95, browser-to-download overhead, in-flight SC7,
-  SC8 streaming RSS) are marked unverified there: no real-browser driver
-  is installed and this project fabricates no such evidence.
+  and exits nonzero when exceeded. The `browser` section carries the
+  real-browser evidence from `scripts/benchmark-browser.mjs` (Puppeteer,
+  development-only): cold open to first painted thumbnail, the 100-thumbnail
+  rotate gesture, and export-to-downloadable, each with its producing
+  environment. In-flight SC7 cancellation and SC8 streaming RSS remain
+  unverified there.

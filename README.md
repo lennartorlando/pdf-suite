@@ -8,10 +8,11 @@ Rechner; Weboberfläche und CLI verwenden dieselbe Core-Logik.
 
 Die erste vollständige Version ist implementiert. Das Repository enthält:
 
-- eine lokale Weboberfläche zum Auswählen, Komprimieren und Herunterladen von PDFs,
+- eine lokale Weboberfläche zum Auswählen, Komprimieren, Bearbeiten und Ausfüllen von PDFs,
 - einen nur an `127.0.0.1` gebundenen HTTP-Server,
 - eine CLI für Skripte, Automationen und Agenten,
 - lokale Texterkennung für deutsche und englische Scans,
+- lokales Ausfüllen und Signieren von PDF-Formularen,
 - drei Profile: `conservative`, `balanced` und `aggressive`,
 - strukturierte JSON-Ausgabe für maschinelle Verbraucher.
 
@@ -22,11 +23,18 @@ Die Bearbeitung bleibt auf Seitenebene. Optional ergänzt OCR eine durchsuchbare
 Textebene, ohne einen Cloud-Dienst zu verwenden. Details stehen in
 [`docs/architecture/page-editing.md`](docs/architecture/page-editing.md).
 
+Formularfelder lassen sich in der Weboberfläche oder über die CLI
+ausfüllen; Text, Häkchen und eine gezeichnete Unterschrift werden auf der
+Seite platziert. Ein Agent füllt nur über einen Plan, den die Person
+ausdrücklich genehmigt hat. Details stehen in
+[`docs/architecture/form-filling.md`](docs/architecture/form-filling.md).
+
 ## Voraussetzungen
 
 - Node.js und npm
 - [`qpdf`](https://qpdf.sourceforge.io/) >= 12.4.1 (Pflicht für
-  Seitenexport; darunter bricht die App geschlossen ab)
+  Seitenexport und Formularausfüllung; darunter bricht die App
+  geschlossen ab)
 - [Ghostscript](https://www.ghostscript.com/) >= 10.07.1 (optional, nur
   für Kompressionsprofile nach dem Export)
 - [OCRmyPDF](https://ocrmypdf.readthedocs.io/) >= 17.0.0 und Tesseract
@@ -85,23 +93,38 @@ node packages/cli/dist/index.js ocr scan.pdf \
 node packages/cli/dist/index.js capabilities --json
 ```
 
+Formulare inspizieren, ausfüllen und nachprüfen (Agentenpfad mit
+Genehmigungsbeleg):
+
+```bash
+node packages/cli/dist/index.js forms fields formular.pdf --json
+node packages/cli/dist/index.js forms validate plan.json --json
+node packages/cli/dist/index.js forms apply plan.json --json
+node packages/cli/dist/index.js forms verify ausgefuellt.pdf --plan plan.json --json
+node packages/cli/dist/index.js forms burn-in ausgefuellt.pdf --output flach.pdf --json
+```
+
 Verschlüsselte, signierte oder aktiv-inhaltliche PDFs (JavaScript,
-Launch-/Open-Actions, eingebettete Dateien u. a.) werden geschlossen
-abgewiesen. Formulare, Lesezeichen, Tags und Seitenlabels überleben den
-Export ggf. nicht; die App meldet sie als Kompatibilitätswarnung.
+Launch-/Open-Actions, eingebettete Dateien u. a.) werden auf den
+Kompressions- und Exportpfaden geschlossen abgewiesen. Die
+Formularausfüllung entsperrt ein Dokument mit leerem Passwort, entfernt
+feldgebundene Aktionen aus der gelieferten Datei und verweigert
+katalogweite aktive Inhalte weiterhin. Formularfelder und ihre Werte
+überleben den Seitenexport; Lesezeichen, Tags und Seitenlabels
+möglicherweise nicht, die App meldet sie als Kompatibilitätswarnung.
 Exporte erzeugen immer eine neue Datei, sind einmalig herunterladbar und
 werden nach Download, Verwerfen oder Ablauf (10 Minuten) gelöscht.
 
 ## Repository-Struktur
 
 ```text
-apps/web/          Browseroberfläche (Kompressor + Seiteneditor)
-apps/local-server/ Lokaler Server, Kompressions- und Seitenexportrouten
-packages/core/     Validierung, Profile, native Kompression und Seitenmontage
-packages/cli/      Kommandozeilenoberfläche (compress, inspect, assemble, ocr, capabilities)
+apps/web/          Browseroberfläche (Kompressor + Seiteneditor + Formularausfüllung)
+apps/local-server/ Lokaler Server, Kompressions-, Export- und Füllrouten
+packages/core/     Validierung, Profile, native Kompression, Seitenmontage und Füllung
+packages/cli/      Kommandozeilenoberfläche (compress, inspect, assemble, ocr, forms, capabilities)
 tests/fixtures/    Testdateien
 tests/integration/ E2E-Nachweis über Core, CLI und Server (reales qpdf)
-tests/performance/ Deterministische Benchmark-Korpora (20/100/500 Seiten)
+tests/performance/ Deterministische Benchmark-Korpora (Seiten- und Formularfälle)
 scripts/           Bundle-Budget, Native-Versionstor, Benchmark-Harness
 docs/              Architektur-, Sicherheits- und Datenschutzdokumentation
 ```
@@ -116,6 +139,9 @@ npm run build
 npm run check:editor-bundle
 npm run check:native-versions
 npm run benchmark:page-editor
+npm run benchmark:form-filling
+npx puppeteer browsers install chrome
+npm run benchmark:browser
 ```
 
 Weitere Details stehen in [`docs/privacy.md`](docs/privacy.md), [`docs/security.md`](docs/security.md) und [`docs/architecture`](docs/architecture).
