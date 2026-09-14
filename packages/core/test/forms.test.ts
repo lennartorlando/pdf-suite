@@ -87,11 +87,13 @@ async function expectFillError(
 ): Promise<void> {
   const outputPath = join(scratch, `${unique("rejected")}.pdf`);
   const planPath = await writePlan(unique("plan"), sourcePath, outputPath, entries, extras);
+  const sourceBefore = await sha256File(sourcePath);
   await expect(
     fillForm({ sourcePath, planPath, destinationPath: outputPath, workspaceParent, ...(extras.run ? { run: extras.run } : {}) })
   ).rejects.toMatchObject({ code });
-  // No rejection ever leaves a partial write behind.
+  // No rejection ever leaves a partial write behind or touches the source.
   await expect(stat(outputPath)).rejects.toThrow();
+  expect(await sha256File(sourcePath)).toBe(sourceBefore);
 }
 
 async function fieldIdOf(sourcePath: string, index = 0): Promise<string> {
@@ -457,6 +459,7 @@ describe("fillForm success paths", () => {
   it("fills a field carrying format actions and delivers no script or submit action", async () => {
     const source = await writeSource("ok-scripts", { formTextField: true, formFieldScripts: true });
     const fieldId = await fieldIdOf(source);
+    const sourceBefore = await sha256File(source);
     const { outputPath, summary } = await fill(source, [
       { kind: "field", fieldId, status: "answered", value: "done" }
     ]);
@@ -468,6 +471,7 @@ describe("fillForm success paths", () => {
     }
     const rows = await readFieldRows(outputPath, fieldId);
     expect(rows.every((row) => row.value === "done")).toBe(true);
+    expect(await sha256File(source)).toBe(sourceBefore);
   });
 
   it("places text and a drawn signature on a field-free document and burns them in", async () => {
@@ -614,10 +618,12 @@ describe("fillForm terminal-state hygiene", () => {
     controller.abort();
     const outputPath = join(scratch, `${unique("cancel")}.pdf`);
     const planPath = await writePlan(unique("plan"), source, outputPath, []);
+    const sourceBefore = await sha256File(source);
     await expect(
       fillForm({ sourcePath: source, planPath, destinationPath: outputPath, signal: controller.signal, workspaceParent })
     ).rejects.toMatchObject({ code: "JOB_CANCELLED" });
     await expect(stat(outputPath)).rejects.toThrow();
+    expect(await sha256File(source)).toBe(sourceBefore);
     await workspaceIsEmpty();
   });
 
@@ -625,10 +631,12 @@ describe("fillForm terminal-state hygiene", () => {
     const source = await writeSource("fail-timeout", { formTextField: true });
     const outputPath = join(scratch, `${unique("timeout")}.pdf`);
     const planPath = await writePlan(unique("plan"), source, outputPath, []);
+    const sourceBefore = await sha256File(source);
     await expect(
       fillForm({ sourcePath: source, planPath, destinationPath: outputPath, timeoutMs: 1, workspaceParent })
     ).rejects.toMatchObject({ code: "JOB_TIMEOUT" });
     await expect(stat(outputPath)).rejects.toThrow();
+    expect(await sha256File(source)).toBe(sourceBefore);
     await workspaceIsEmpty();
   });
 });

@@ -389,10 +389,10 @@ Keep these central and cover the boundary values in tests.
 | Receipt validity window | 30 minutes |
 | Receipt uses | 1 |
 | Fill output retention | 30 minutes |
-| Full page canvases mounted | 2 |
-| Decoded page canvas budget | 96 MiB |
+| Full page canvases mounted | 1 (planned 2; corrected 2026-09-14) |
+| Decoded page canvas budget | 64 MiB (planned 96 MiB; corrected 2026-09-14) |
 
-The source cap for filling is lower than the export cap, because the fill child holds a whole document in memory. The page canvas budget is separate from the thumbnail pool rather than shared with it. Fill output is retained longer than page-export output, because re-filling costs the person their typed values where re-exporting costs nothing.
+The source cap for filling is lower than the export cap, because the fill child holds a whole document in memory. The page canvas budget is separate from the thumbnail pool rather than shared with it. Fill output is retained longer than page-export output, because re-filling costs the person their typed values where re-exporting costs nothing. (corrected 2026-09-14: the shipped surface mounts one page canvas capped at `MAX_PAGE_CANVAS_PIXELS = 16 * 1024 * 1024`, which is 64 MiB decoded RGBA, so the implementation came in tighter than the budget in both dimensions.)
 
 ### Sequencing
 
@@ -751,7 +751,7 @@ Units carry stable identifiers and are not renumbered; execution order is U1, U1
 - **Approach:** Encode the loop: inventory the document, propose only from what the agent already holds, never propose computed, password or hidden fields, build multiple-choice questions from the enumerated allowed values rather than from free text, treat every document-derived label as data and never as instruction, ask rather than guess when no label could be derived, present the complete plan for approval, apply with the receipt, verify, and report per field without echoing values. State the boundaries: no signing, no free placement, no reveal flag unless asked, and no attempt to work around a refusal. Record the reversal of the earlier no-prompts decision per KTD15, and state plainly that the person's transcript will contain identity data whenever the loop runs.
 - **Patterns to follow:** The architecture documents' fixed shape of contracts, data flow, boundaries, and budgets and evidence.
 - **Test scenarios:** Test expectation: none -- this unit ships instructions, and every safety property it describes is enforced by U4 and covered by its tests. Its behaviour is demonstrated in U8's end-to-end scenario.
-- **Verification:** An agent following the skill completes a form end to end through both the terminal and the browser approval channel, and an agent ignoring it still cannot bypass the approval step.
+- **Verification:** An agent ignoring the skill still cannot bypass the approval step, the half that is code-enforced and covered by U4's refusal tests. The other half of the original claim, that an agent following the skill completes a form end to end through both approval channels, is an expectation rather than a verification: no test can prove skill-following, though both channels the skill drives are exercised end to end. (corrected 2026-09-14: previously stated both halves as verification.)
 
 ### U8. Shared harness, browser evidence and documentation
 
@@ -814,7 +814,7 @@ Units carry stable identifiers and are not renumbered; execution order is U1, U1
 - U5 is complete when both routes enforce the existing loopback boundary and caps, a repeated nonce writes once, and fill job directories are swept.
 - U12 is complete when compression refuses a form-bearing document on all three surfaces without changing its behaviour for anything else, and a filled interactive artifact can be burned in afterwards.
 - U6 is complete when the selected surface supports filling, placement, rejection of a proposed value, signing, agent-proposal review and export, with no eager loading, no per-keystroke work outside the browser, a warning before unsaved values are lost, nothing persisted, the renderer's WebAssembly assets emitted locally under a production policy that gained only `wasm-unsafe-eval`, and its own bundle criteria measurable. The real scanned-page render is U8's.
-- U7 is complete when an agent following the skill fills a form end to end through both approval channels and an agent ignoring it still cannot bypass approval.
+- U7 is complete when an agent following the skill fills a form end to end through both approval channels and an agent ignoring it still cannot bypass approval. (corrected 2026-09-14: only the second half is a checkable property, code-enforced and tested; the first half is the expectation the skill's loop is written to satisfy, since no test can prove skill-following.)
 - U8 is complete when one harness serves every benchmark, the browser harness produces recorded reference-Mac evidence for SC3 and SC4 plus a hosted-runner regression budget that fails a build on a slowdown, every recorded number names the environment that produced it, a scanned form renders in the real browser under the production content policy, three-surface parity holds, and every invalidated document statement is corrected.
 - No runtime dependency new to this repository is added, and the browser driver is the only new development dependency, absent from every shipped package's dependencies.
 - The agent path adds no MCP server, no second workspace model beyond the plan, receipt and audit files, and no persistent store of personal data inside the application or the browser.

@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as core from "@pdf-compressor/core";
 import { parseFormPlan, serializeFormPlan, type FormPlan } from "@pdf-compressor/core/form-plan";
-import { writeTestPdf } from "../../../packages/core/test/pdf-fixtures.js";
+import { sha256File, writeTestPdf } from "../../../packages/core/test/pdf-fixtures.js";
 import { JobManager, LIMITS } from "../src/jobs.js";
 import { createLocalServer } from "../src/server.js";
 import { SessionStore } from "../src/session.js";
@@ -821,6 +821,7 @@ describe("fill and inventory routes", () => {
     const edge = "disconnectedge";
     const plan = makePlan("nonce-disconnect", fieldId);
     const body = fillBody(edge, plan, pdf);
+    const sourceBefore = await sha256File(sourcePath);
     await new Promise<void>((resolve) => {
       const req = request({
         host: "127.0.0.1",
@@ -855,6 +856,7 @@ describe("fill and inventory routes", () => {
     }
     expect(await tempEntries()).toEqual([]);
     expect(jobs.retainedCount()).toBe(0);
+    expect(await sha256File(sourcePath)).toBe(sourceBefore);
   });
 
   it("reports filling unavailable when qpdf is missing instead of degrading", async () => {
