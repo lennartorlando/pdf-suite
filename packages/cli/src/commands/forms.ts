@@ -13,8 +13,9 @@
  * file the person approved. `apply` snapshots the plan and the source into a
  * private workspace and digests those exact bytes; a supplied receipt must
  * bind both digests, the plan nonce and a live expiry. Without a receipt the
- * command mints one on an interactive terminal after rendering every approved
- * value — and refuses outright in a non-interactive context. The nonce is
+ * command mints one on the controlling terminal after rendering every
+ * approved value — and refuses outright when that terminal cannot be opened.
+ * The nonce is
  * claimed in a fixed per-user ledger before the write begins, as one atomic
  * exclusive create, so two concurrent applies cannot both pass. No command
  * option may change what is written or where: destination, overwrite and
@@ -26,7 +27,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { access, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { constants } from "node:fs";
+import { closeSync, constants, createReadStream, createWriteStream, openSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -125,9 +126,11 @@ export interface FormsCommandDeps {
   ledgerDir?: string;
   /** Parent for the private snapshot/readback workspaces. */
   workspaceParent?: string;
-  /** Whether an interactive person is at the terminal; defaults to TTY detection. */
+  /** Whether an interactive person is at the terminal; defaults to opening the controlling terminal. */
   isInteractive?: boolean;
-  /** Renders the approval and returns the person's decision; defaults to a stderr prompt. */
+  /** Opens the controlling terminal for the approval prompt; defaults to /dev/tty (CONIN$/CONOUT$ on Windows). */
+  openApprovalTerminal?: () => ApprovalTerminal | null;
+  /** Renders the approval and returns the person's decision; defaults to a prompt on the controlling terminal. */
   confirmApproval?: (display: string) => Promise<boolean>;
 }
 
@@ -668,9 +671,58 @@ function renderApprovalDisplay(plan: FormPlan, check: FormPlanCheck, resolvedDes
   return lines.join("\n");
 }
 
-async function defaultConfirmApproval(display: string): Promise<boolean> {
-  process.stderr.write(`${display}\n`);
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
+/**
+ * The controlling terminal, held open for the approval prompt. The prompt
+ * and the answer travel on this channel only — never on inherited stdio.
+ */
+export interface ApprovalTerminal {
+  readonly input: NodeJS.ReadableStream;
+  readonly output: NodeJS.WritableStream;
+  close(): void;
+}
+
+/**
+ * Open the process's controlling terminal directly, the way sudo and ssh do:
+ * by device path, not through inherited stdio. A pipe — or an agent-owned
+ * pseudo-terminal wired to stdin and stderr — satisfies isTTY without a
+ * person at the keys, but it is not the session's controlling terminal, so
+ * this open fails there. Callers treat a failure as a refusal, never as a
+ * reason to fall back to stdio.
+ */
+export function openApprovalTerminal(): ApprovalTerminal | null {
+  const readPath = process.platform === "win32" ? "CONIN$" : "/dev/tty";
+  const writePath = process.platform === "win32" ? "CONOUT$" : "/dev/tty";
+  let inputFd: number;
+  let outputFd: number;
+  try {
+    inputFd = openSync(readPath, "r");
+    try {
+      outputFd = openSync(writePath, "w");
+    } catch (error) {
+      closeSync(inputFd);
+      throw error;
+    }
+  } catch {
+    return null;
+  }
+  return {
+    input: createReadStream(readPath, { fd: inputFd, autoClose: false }),
+    output: createWriteStream(writePath, { fd: outputFd, autoClose: false }),
+    close() {
+      closeSync(inputFd);
+      closeSync(outputFd);
+    }
+  };
+}
+
+/**
+ * Render the approval and read the answer on the controlling terminal
+ * itself. Nothing the caller piped into the process can speak for the
+ * person, because neither side touches stdin or stderr.
+ */
+async function confirmOnTerminal(terminal: ApprovalTerminal, display: string): Promise<boolean> {
+  terminal.output.write(`${display}\n`);
+  const rl = createInterface({ input: terminal.input, output: terminal.output });
   try {
     const answer = await rl.question('Type "apply" to approve and write the document: ');
     return answer.trim() === "apply";
@@ -909,7 +961,7 @@ async function runFormsApply(args: string[], deps: FormsCommandDeps): Promise<Cl
     const sourceDigest = sha256(sourceBytes);
 
     // The receipt: supplied by the browser approval flow, or minted here on
-    // an interactive terminal after the person has seen every approved value.
+    // the controlling terminal after the person has seen every approved value.
     let receipt: FormReceipt;
     let receiptPath = options.receiptPath;
     if (receiptPath === undefined && (await exists(receiptPathFor(options.planPath)))) {
@@ -919,7 +971,14 @@ async function runFormsApply(args: string[], deps: FormsCommandDeps): Promise<Cl
       receipt = await readReceiptFile(resolve(receiptPath));
       assertReceiptBinds(receipt, plan, planDigest, sourceDigest);
     } else {
-      const interactive = deps.isInteractive ?? (process.stdin.isTTY === true && process.stderr.isTTY === true);
+      // The prompt and the confirmation read go through the controlling
+      // terminal, opened directly the way sudo and ssh do — inherited stdio
+      // is never consulted, so a pipe or an agent-owned pseudo-terminal
+      // wired to stdin and stderr cannot answer for the person. A failed
+      // open refuses; there is no fallback to the stdio check (KTD7).
+      const openTerminal = deps.openApprovalTerminal ?? openApprovalTerminal;
+      let terminal = deps.isInteractive === undefined ? openTerminal() : null;
+      const interactive = deps.isInteractive ?? (terminal !== null);
       if (!interactive) {
         throw new CompressionError(
           "FILL_RECEIPT_REQUIRED",
@@ -932,9 +991,22 @@ async function runFormsApply(args: string[], deps: FormsCommandDeps): Promise<Cl
         workspaceParent: deps.workspaceParent
       });
       const display = renderApprovalDisplay(plan, check, await resolvedRealPath(plan.destination));
-      const confirm = deps.confirmApproval ?? defaultConfirmApproval;
-      if (!(await confirm(display))) {
-        throw new CompressionError("JOB_CANCELLED", "Approval declined; nothing was written.");
+      const confirm = deps.confirmApproval ?? (async (rendered: string): Promise<boolean> => {
+        terminal ??= openTerminal();
+        if (terminal === null) {
+          throw new CompressionError(
+            "FILL_RECEIPT_REQUIRED",
+            "Applying a plan needs an approval receipt. Approve interactively on a terminal, or pass --receipt."
+          );
+        }
+        return confirmOnTerminal(terminal, rendered);
+      });
+      try {
+        if (!(await confirm(display))) {
+          throw new CompressionError("JOB_CANCELLED", "Approval declined; nothing was written.");
+        }
+      } finally {
+        terminal?.close();
       }
       receipt = mintFormReceipt(plan.nonce, planDigest, sourceDigest, "terminal");
       receiptPath = receiptPathFor(options.planPath);

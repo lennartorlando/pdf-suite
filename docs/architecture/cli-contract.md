@@ -113,10 +113,12 @@ approved. Field values never appear on stdout by default: `fields` reports
   requires a receipt binding both digests plus the plan nonce and a live
   expiry, then claims the nonce in the fixed per-user ledger
   (`~/.pdf-compressor/fill-ledger`) as one atomic exclusive create before the
-  write begins. Without a receipt the command mints one interactively after
+  write begins. Without a receipt the command mints one on the session's
+  controlling terminal — opened directly, the way sudo and ssh do, so a pipe
+  or a pseudo-terminal wired to stdio cannot answer for the person — after
   rendering every approved value, the resolved destination, the overwrite and
-  burn-in decisions and the entry count; in a non-interactive context it
-  refuses with `FILL_RECEIPT_REQUIRED`. The minted receipt and an audit
+  burn-in decisions and the entry count; where that terminal cannot be opened
+  it refuses with `FILL_RECEIPT_REQUIRED`. The minted receipt and an audit
   record are written beside the plan file, owner-readable only; the audit
   binds the digests, the receipt identifier, the approval channel, the
   resolved qpdf path and version, and the outcome.

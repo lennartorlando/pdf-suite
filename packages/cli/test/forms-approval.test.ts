@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   defaultNativeRunner,
@@ -401,6 +402,100 @@ describe("interactive approval", () => {
     };
     expect(audit.qpdfVersion).not.toBeNull();
     expect(audit.outcome.status).toBe("applied");
+  });
+
+  it("cannot be completed by a scripted stdin — the prompt reads the controlling terminal", async () => {
+    const source = await writeSource("gate-stdinforge", { formTextField: true });
+    const fields = await inventoryOf(source);
+    const { planPath, destPath } = await writePlan("gate-stdinforge", source, [
+      { kind: "field", fieldId: fieldIdByLabel(fields, "fixture-name"), status: "answered", value: "x" }
+    ]);
+    // Recreate what the old gate trusted: terminal flags on inherited stdio
+    // plus a scripted "apply" line on stdin. Under the previous check that
+    // combination minted a receipt without a person.
+    const stdinTTY = process.stdin.isTTY;
+    const stderrTTY = process.stderr.isTTY;
+    const terminalInput = new PassThrough();
+    const terminalOutput = new PassThrough();
+    let rendered = "";
+    terminalOutput.on("data", (chunk: Buffer) => {
+      rendered += chunk.toString("utf8");
+    });
+    process.stdin.isTTY = true;
+    process.stderr.isTTY = true;
+    try {
+      process.stdin.push("apply\n");
+    } catch {
+      // A closed stdin in the runner only removes the old bypass's fuel; the
+      // assertion below does not depend on the push landing.
+    }
+    try {
+      const declined = runFormsCommand(["apply", planPath, "--json"], deps({
+        isInteractive: undefined,
+        openApprovalTerminal: () => ({
+          input: terminalInput,
+          output: terminalOutput,
+          close: () => undefined
+        })
+      }));
+      // The only channel that can answer is the terminal, and it does not
+      // say "apply" — the bytes sitting on stdin are never read.
+      terminalInput.write("forged\n");
+      const result = await declined;
+      expect(result.exitCode).toBe(4);
+      expect((JSON.parse(result.stdout) as { code: string }).code).toBe("JOB_CANCELLED");
+      expect(rendered).toContain("Approve this fill");
+      await expect(stat(destPath)).rejects.toThrow();
+      await expect(stat(`${planPath}.receipt.json`)).rejects.toThrow();
+    } finally {
+      process.stdin.isTTY = stdinTTY;
+      process.stderr.isTTY = stderrTTY;
+    }
+  });
+
+  it("refuses with FILL_RECEIPT_REQUIRED when the controlling terminal cannot be opened", async () => {
+    const source = await writeSource("gate-notty", { formTextField: true });
+    const fields = await inventoryOf(source);
+    const { planPath, destPath } = await writePlan("gate-notty", source, [
+      { kind: "field", fieldId: fieldIdByLabel(fields, "fixture-name"), status: "answered", value: "x" }
+    ]);
+    const result = await runFormsCommand(["apply", planPath, "--json"], deps({
+      isInteractive: undefined,
+      openApprovalTerminal: () => null
+    }));
+    expect(result.exitCode).toBe(2);
+    expect((JSON.parse(result.stdout) as { code: string }).code).toBe("FILL_RECEIPT_REQUIRED");
+    await expect(stat(destPath)).rejects.toThrow();
+  });
+
+  it("mints a terminal receipt when the controlling terminal answers apply", async () => {
+    const source = await writeSource("gate-ttymint", { formTextField: true });
+    const fields = await inventoryOf(source);
+    const { planPath, destPath } = await writePlan("gate-ttymint", source, [
+      { kind: "field", fieldId: fieldIdByLabel(fields, "fixture-name"), status: "answered", value: "VIA-TERMINAL" }
+    ]);
+    const terminalInput = new PassThrough();
+    const terminalOutput = new PassThrough();
+    let rendered = "";
+    terminalOutput.on("data", (chunk: Buffer) => {
+      rendered += chunk.toString("utf8");
+    });
+    terminalInput.write("apply\n");
+    const applied = await runFormsCommand(["apply", planPath, "--json"], deps({
+      isInteractive: undefined,
+      openApprovalTerminal: () => ({
+        input: terminalInput,
+        output: terminalOutput,
+        close: () => undefined
+      })
+    }));
+    expect(applied.exitCode).toBe(0);
+    expect(rendered).toContain("Approve this fill");
+    expect(rendered).toContain("VIA-TERMINAL");
+    expect(rendered).toContain('Type "apply" to approve');
+    expect((await stat(destPath)).isFile()).toBe(true);
+    const receipt = JSON.parse(await readFile(`${planPath}.receipt.json`, "utf8")) as { channel: string };
+    expect(receipt.channel).toBe("terminal");
   });
 
   it("a declined approval writes nothing and burns no nonce", async () => {
