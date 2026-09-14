@@ -226,11 +226,11 @@ async function runFillWork(
 ): Promise<FillRouteOutcome> {
   const { jobs } = ctx;
   let nonce: string | null = null;
-  const finish = (outcome: FillRouteOutcome): FillRouteOutcome => {
+  const finish = (outcome: FillRouteOutcome, retainedHandle?: string): FillRouteOutcome => {
     // Only a produced write is stored: an interrupted or refused attempt may
     // re-run for identical bytes, while different bytes are always rejected.
     if (nonce !== null && outcome.status === 200) {
-      jobs.completeFillNonce(nonce, { status: outcome.status, payload: outcome.payload });
+      jobs.completeFillNonce(nonce, { status: outcome.status, payload: outcome.payload }, retainedHandle);
     }
     return outcome;
   };
@@ -333,26 +333,29 @@ async function runFillWork(
       pageCount: summary.pageCount,
       ttlMs: LIMITS.fillOutputTtlMs
     });
-    return finish({
-      status: 200,
-      payload: {
-        ok: true,
-        handle: retained.handle,
-        downloadUrl: `/api/outputs/${retained.handle}/download`,
-        pageCount: summary.pageCount,
-        outputBytes: summary.outputBytes,
-        burnedIn: summary.burnedIn,
-        fieldsWritten: summary.fieldsWritten,
-        placementsWritten: summary.placementsWritten,
-        computedFields: summary.computedFields,
-        removedRestrictions: summary.removedRestrictions,
-        removedUsageRights: summary.removedUsageRights,
-        sourceHash: summary.sourceHash,
-        warnings: summary.warnings,
-        compatWarnings: summary.compatWarnings
+    return finish(
+      {
+        status: 200,
+        payload: {
+          ok: true,
+          handle: retained.handle,
+          downloadUrl: `/api/outputs/${retained.handle}/download`,
+          pageCount: summary.pageCount,
+          outputBytes: summary.outputBytes,
+          burnedIn: summary.burnedIn,
+          fieldsWritten: summary.fieldsWritten,
+          placementsWritten: summary.placementsWritten,
+          computedFields: summary.computedFields,
+          removedRestrictions: summary.removedRestrictions,
+          removedUsageRights: summary.removedUsageRights,
+          sourceHash: summary.sourceHash,
+          warnings: summary.warnings,
+          compatWarnings: summary.compatWarnings
+        },
+        retainedDir: jobDir
       },
-      retainedDir: jobDir
-    });
+      retained.handle
+    );
   } catch (error) {
     if (deadline.timedOut) {
       error = new CompressionError("JOB_TIMEOUT", "Fill exceeded its runtime budget.");

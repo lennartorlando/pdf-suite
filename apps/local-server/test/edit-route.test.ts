@@ -10,6 +10,7 @@ import { buildTestPdf, writeTestPdf } from "../../../packages/core/test/pdf-fixt
 import { JobManager } from "../src/jobs.js";
 import { createLocalServer } from "../src/server.js";
 import { SessionStore } from "../src/session.js";
+import { sanitizeExportError } from "../src/routes/edit.js";
 
 interface HttpResult {
   status: number;
@@ -538,6 +539,13 @@ describe("page export route", () => {
     } finally {
       for (const handle of leasedHandles) await jobs.consume(handle, sessionId);
     }
+  });
+
+  it("keeps an unrecognized core error code at 500 instead of masking it", async () => {
+    // Simulates a code added to CompressionErrorCode without a route case: the
+    // response must surface the new code, not collapse it to EXPORT_FAILED.
+    const forged = new core.CompressionError("SOME_FUTURE_CODE" as core.CompressionErrorCode, "unmapped");
+    expect(sanitizeExportError(forged)).toEqual({ status: 500, code: "SOME_FUTURE_CODE" });
   });
 
   it("reports qpdf and ghostscript capabilities independently", async () => {

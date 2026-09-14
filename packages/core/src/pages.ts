@@ -5,6 +5,7 @@ import { CompressionError } from "./errors.js";
 import {
   GHOSTSCRIPT_SECURITY_FLOOR,
   QPDF_SECURITY_FLOOR,
+  assertAdmissibleFor,
   assertNativeFloor,
   getGhostscriptVersion,
   getQpdfVersion,
@@ -305,25 +306,10 @@ export async function assemblePages(options: AssemblePagesOptions): Promise<Asse
   const inspectionWarnings: string[] = [];
   for (const source of referencedSources) {
     const inspection = await inspectPdfSource(source.path, calls);
-    if (inspection.encrypted) {
-      throw new CompressionError("INPUT_ENCRYPTED", `Source "${source.id}" is encrypted.`, {
-        sourceId: source.id,
-        inputPath: source.path
-      });
-    }
-    if (inspection.signed) {
-      throw new CompressionError("INPUT_SIGNED", `Source "${source.id}" carries a digital signature.`, {
-        sourceId: source.id,
-        inputPath: source.path
-      });
-    }
-    if (inspection.activeContent.length > 0) {
-      throw new CompressionError(
-        "INPUT_HAS_ACTIVE_CONTENT",
-        `Source "${source.id}" contains blocked active content (${inspection.activeContent.join(", ")}).`,
-        { sourceId: source.id, inputPath: source.path, activeContent: inspection.activeContent }
-      );
-    }
+    assertAdmissibleFor(inspection, "assemble", {
+      label: `Source "${source.id}"`,
+      details: { sourceId: source.id, inputPath: source.path }
+    });
     inspections.set(source.id, inspection);
     inspectionWarnings.push(...inspection.warnings);
   }

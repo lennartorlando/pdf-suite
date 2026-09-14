@@ -85,6 +85,8 @@ export interface FillIdempotencyRecord {
   readonly sourceDigest: string;
   /** Present once the nonce's request produced an outcome worth replaying. */
   outcome?: FillOutcome;
+  /** The retained output the outcome's download handle names; replay dies with it. */
+  retainedHandle?: string;
 }
 
 export type FillNonceVerdict =
@@ -282,14 +284,23 @@ export class JobManager {
     if (record.sessionId !== claim.sessionId) return { kind: "foreign" };
     if (record.planDigest !== claim.planDigest) return { kind: "plan-mismatch" };
     if (record.sourceDigest !== claim.sourceDigest) return { kind: "source-mismatch" };
-    if (record.outcome) return { kind: "replay", outcome: record.outcome };
+    if (record.outcome) {
+      // Replay is only valid while the retained output it references lives.
+      if (record.retainedHandle === undefined || this.retained.has(record.retainedHandle)) {
+        return { kind: "replay", outcome: record.outcome };
+      }
+      delete record.outcome;
+      delete record.retainedHandle;
+    }
     return { kind: "resume" };
   }
 
-  /** Attach the produced outcome to a claimed nonce; a byte-identical repeat replays it. */
-  completeFillNonce(nonce: string, outcome: FillOutcome): void {
+  /** Attach the produced outcome to a claimed nonce; a byte-identical repeat replays it while the retained output lives. */
+  completeFillNonce(nonce: string, outcome: FillOutcome, retainedHandle?: string): void {
     const record = this.fillRecords.get(nonce);
-    if (record) record.outcome = outcome;
+    if (!record) return;
+    record.outcome = outcome;
+    record.retainedHandle = retainedHandle;
   }
 
   /** Create a private per-job directory owned by the current user. */
@@ -517,13 +528,28 @@ export class JobManager {
     const record = this.retained.get(handle);
     if (!record) return;
     this.retained.delete(handle);
+    this.expireFillOutcome(handle);
     await this.cleanupDirectory(record.jobDir);
   }
 
   private deleteRetainedSync(record: RetainedOutput): void {
     this.retained.delete(record.handle);
+    this.expireFillOutcome(record.handle);
     this.pendingCleanup.add(record.jobDir);
     void this.cleanupDirectory(record.jobDir);
+  }
+
+  /**
+   * A stored fill outcome is replayable only while the output it references
+   * is still retained: once the handle is consumed, evicted or swept, the
+   * next identical submission resumes instead of answering with a dead link.
+   */
+  private expireFillOutcome(handle: string): void {
+    for (const record of this.fillRecords.values()) {
+      if (record.retainedHandle !== handle) continue;
+      delete record.outcome;
+      delete record.retainedHandle;
+    }
   }
 
   private async cleanupDirectory(dir: string): Promise<void> {

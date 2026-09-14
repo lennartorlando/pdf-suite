@@ -436,4 +436,19 @@ describe("forms clean", () => {
       await expect(stat(path)).rejects.toThrow();
     }
   });
+
+  it("reports only the files that existed, not the absent receipt or audit paths", async () => {
+    const source = await writeSource("clean-missing", { formTextField: true });
+    const fields = await inventoryOf(source);
+    const { planPath } = await writePlan("clean-missing", source, [
+      { kind: "field", fieldId: fieldIdByLabel(fields, "fixture-name"), status: "answered", value: "x" }
+    ]);
+    // No apply ran: the receipt and audit companions were never written.
+    const cleaned = await runFormsCommand(["clean", planPath, "--json"], deps());
+    expect(cleaned.exitCode).toBe(0);
+    const payload = JSON.parse(cleaned.stdout) as { removed: string[]; failed?: string[] };
+    expect(payload.removed).toEqual([planPath]);
+    expect(payload.failed).toBeUndefined();
+    await expect(stat(planPath)).rejects.toThrow();
+  });
 });

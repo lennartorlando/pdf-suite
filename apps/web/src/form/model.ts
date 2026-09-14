@@ -110,7 +110,7 @@ export function isFillable(field: FormFieldEntry): boolean {
 
 /** A checkbox's on-state: the document's own export value, or the default. */
 export function onValue(field: FormFieldEntry): string {
-  return field.allowedValues?.[0]?.text ?? "Yes";
+  return field.allowedValues?.find((option) => option.text !== "Off")?.text ?? "Yes";
 }
 
 /** A radio widget's on-state, indexed in the same order as `allowedValues`. */

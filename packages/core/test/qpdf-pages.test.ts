@@ -1,13 +1,15 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { compressPdf } from "../src/compress.js";
 import { ocrPdf } from "../src/ocr.js";
 import { assemblePages } from "../src/pages.js";
 import {
   classifyQpdfJson,
   inspectPdfSource,
   isAdmissibleFor,
+  planFieldActionRemoval,
   type AdmissionOperation,
   type PdfInspection
 } from "../src/engines/qpdf-pages.js";
@@ -58,17 +60,37 @@ async function withFixture(
   }
 }
 
-async function expectRefused(dir: string, path: string): Promise<void> {
+async function expectRefused(dir: string, path: string, code = "INPUT_HAS_ACTIVE_CONTENT"): Promise<void> {
   await expect(
     assemblePages({
       sources: [{ id: "a", path }],
       manifest: createManifest([{ sourceId: "a", page: 1 }]),
       destinationPath: join(dir, "assembled.pdf")
     })
-  ).rejects.toMatchObject({ code: "INPUT_HAS_ACTIVE_CONTENT" });
+  ).rejects.toMatchObject({ code });
   await expect(
     ocrPdf({ inputPath: path, outputPath: join(dir, "ocred.pdf"), languages: ["eng"] })
-  ).rejects.toMatchObject({ code: "INPUT_HAS_ACTIVE_CONTENT" });
+  ).rejects.toMatchObject({ code });
+  let engineRan = false;
+  await expect(
+    compressPdf({
+      inputPath: path,
+      outputPath: join(dir, "compressed.pdf"),
+      profile: "conservative",
+      engines: [
+        {
+          name: "must-not-run",
+          supports: () => true,
+          compress: async (_input, output) => {
+            engineRan = true;
+            await writeFile(output, "x");
+            return { engine: "must-not-run", warnings: [] };
+          }
+        }
+      ]
+    })
+  ).rejects.toMatchObject({ code });
+  expect(engineRan).toBe(false);
 }
 
 describe("active-content admission", () => {
@@ -193,6 +215,15 @@ describe("active-content admission", () => {
     );
   });
 
+  it("refuses signed and XFA input for compress, assembly and OCR alike", async () => {
+    await withFixture({ docMdpSignature: true }, async (dir, path) => {
+      await expectRefused(dir, path, "INPUT_SIGNED");
+    });
+    await withFixture({ xfaDynamic: true }, async (dir, path) => {
+      await expectRefused(dir, path, "INPUT_XFA");
+    });
+  });
+
   it("terminates a cyclic action chain within the budget and refuses", async () => {
     await withFixture({ cyclicActions: true }, async (dir, path, inspection) => {
       expect(inspection.activeContent).toContain("/Launch@catalog");
@@ -302,6 +333,53 @@ describe("active-content admission", () => {
     );
     expect(result.activeContent).toEqual([]);
     expect(result.compatWarnings).toContain("forms");
+  });
+});
+
+describe("field-action removal", () => {
+  it("strips only classified action edges and keeps appearance resources named like action keys", () => {
+    // A widget appearance dictionary may legitimately hold keys spelled like
+    // action edges (/A is an appearance-state name here). Cleanup must remove
+    // the widget's real /AA action chain, never that dictionary's data.
+    const raw = jsonDocument(
+      objectMap({
+        "obj:1 0 R": {
+          value: { "/Type": "/Catalog", "/Pages": "2 0 R", "/AcroForm": "4 0 R" }
+        },
+        "obj:4 0 R": { value: { "/Fields": ["5 0 R"] } },
+        "obj:5 0 R": {
+          value: { "/FT": "/Tx", "/T": "u:name", "/Kids": ["6 0 R"] }
+        },
+        "obj:6 0 R": {
+          value: {
+            "/Type": "/Annot",
+            "/Subtype": "/Widget",
+            "/Parent": "5 0 R",
+            "/AA": "7 0 R",
+            "/AP": { "/N": "8 0 R" }
+          }
+        },
+        "obj:7 0 R": { value: { "/O": "9 0 R" } },
+        "obj:9 0 R": { value: { "/S": "/JavaScript", "/JS": "u:app.alert(1)" } },
+        "obj:8 0 R": { value: { "/A": "10 0 R", "/Off": "11 0 R" } },
+        "obj:10 0 R": { stream: { dict: { "/Subtype": "/Form", "/BBox": [0, 0, 10, 10] } } },
+        "obj:11 0 R": { stream: { dict: { "/Subtype": "/Form", "/BBox": [0, 0, 10, 10] } } }
+      }),
+      {
+        acroform: {
+          hasacroform: true,
+          fields: [{ object: "6 0 R", annotation: { object: "6 0 R" }, parent: "5 0 R" }]
+        }
+      }
+    );
+    const update = planFieldActionRemoval(raw);
+    // Only the widget is rewritten; the appearance dictionary, its XObjects
+    // and the orphaned action chain are all left alone (qpdf drops what the
+    // removed /AA edge leaves unreachable).
+    expect(Object.keys(update.objects)).toEqual(["obj:6 0 R"]);
+    const widget = update.objects["obj:6 0 R"]?.value as Record<string, unknown>;
+    expect(widget["/AA"]).toBeUndefined();
+    expect(widget["/AP"]).toEqual({ "/N": "8 0 R" });
   });
 });
 

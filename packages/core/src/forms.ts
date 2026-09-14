@@ -542,10 +542,19 @@ function validatePlanEntries(
       );
     }
     if (entry.status !== "answered") continue;
-    if (field.entry.readOnly || field.entry.type === "group" || field.entry.type === "signature" || field.entry.type === "other") {
+    const notFillable = field.entry.readOnly
+      ? "read-only"
+      : field.entry.password
+        ? "a password field"
+        : field.entry.hidden
+          ? "hidden"
+          : field.entry.type === "group" || field.entry.type === "signature" || field.entry.type === "other"
+            ? `type ${field.entry.type}`
+            : undefined;
+    if (notFillable !== undefined) {
       throw new CompressionError(
         "FILL_NOT_FILLABLE",
-        `Field "${entry.fieldId}" is ${field.entry.readOnly ? "read-only" : `type ${field.entry.type}`} and cannot be filled.`,
+        `Field "${entry.fieldId}" is ${notFillable} and cannot be filled.`,
         { fieldId: entry.fieldId, type: field.entry.type, readOnly: field.entry.readOnly }
       );
     }
@@ -865,6 +874,47 @@ function pageContentText(
 }
 
 /**
+ * Positioned-XObject check shared by every burned-in readback: report true
+ * when the page draws an XObject at the approved rect whose stream body
+ * satisfies `ink`. Placements draw at identity with the rect in the XObject
+ * /BBox; flattened field widgets are positioned by the cm matrix instead.
+ */
+function placedXObjectAt(
+  objects: Map<string, QdfObject>,
+  pages: string[],
+  pageIndex: number,
+  rect: PdfRect,
+  ink: (ref: string, body: string) => boolean
+): boolean {
+  const { text, xobjects } = pageContentText(objects, pages, pageIndex);
+  const doPattern =
+    /-?[\d.]+\s+-?[\d.]+\s+-?[\d.]+\s+-?[\d.]+\s+(-?[\d.]+)\s+(-?[\d.]+)\s+cm\s*\n?\s*\/(\S+)\s+Do/g;
+  for (const match of text.matchAll(doPattern)) {
+    const ref = xobjects.get(`/${match[3]}`) ?? xobjects.get(match[3]);
+    if (ref === undefined) continue;
+    const body = objects.get(ref)?.stream ?? "";
+    const tx = Number(match[1]);
+    const ty = Number(match[2]);
+    if (Math.abs(tx - rect.x) <= 2 && Math.abs(ty - rect.y) <= 2 && ink(ref, body)) return true;
+    if (Math.abs(tx) <= 2 && Math.abs(ty) <= 2) {
+      const bbox = /\/BBox\s*\[([^\]]*)\]/.exec(objects.get(ref)?.dict ?? "");
+      const corners = bbox?.[1].trim().split(/\s+/).map(Number) ?? [];
+      if (
+        corners.length === 4 &&
+        Math.abs(corners[0] - rect.x) <= 2 &&
+        Math.abs(corners[1] - rect.y) <= 2 &&
+        Math.abs(corners[2] - (rect.x + rect.width)) <= 2 &&
+        Math.abs(corners[3] - (rect.y + rect.height)) <= 2 &&
+        ink(ref, body)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * Drawn-object check for burned-in signatures, checkmarks and button
  * states: a positioned XObject drawn at the approved rect whose body is
  * more than save/restore noise — path, fill, text or marked-content ops.
@@ -876,37 +926,24 @@ function placedInkPresent(
   pageIndex: number,
   rect: PdfRect
 ): boolean {
-  const { text, xobjects } = pageContentText(objects, pages, pageIndex);
-  const ink = (ref: string): boolean => {
-    const body = objects.get(ref)?.stream ?? "";
-    return /\b(Tj|TJ|BMC|re|Do)\b|[-\d.]+\s+[-\d.]+\s+(m|c|v|y)\b|\b[SsFf]\b/.test(body);
-  };
-  // Placements draw at identity with the approved rect in the XObject /BBox;
-  // flattened field widgets are positioned by the cm matrix instead.
-  const doPattern =
-    /-?[\d.]+\s+-?[\d.]+\s+-?[\d.]+\s+-?[\d.]+\s+(-?[\d.]+)\s+(-?[\d.]+)\s+cm\s*\n?\s*\/(\S+)\s+Do/g;
-  for (const match of text.matchAll(doPattern)) {
-    const ref = xobjects.get(`/${match[3]}`) ?? xobjects.get(match[3]);
-    if (ref === undefined) continue;
-    const tx = Number(match[1]);
-    const ty = Number(match[2]);
-    if (Math.abs(tx - rect.x) <= 2 && Math.abs(ty - rect.y) <= 2 && ink(ref)) return true;
-    if (Math.abs(tx) <= 2 && Math.abs(ty) <= 2) {
-      const bbox = /\/BBox\s*\[([^\]]*)\]/.exec(objects.get(ref)?.dict ?? "");
-      const corners = bbox?.[1].trim().split(/\s+/).map(Number) ?? [];
-      if (
-        corners.length === 4 &&
-        Math.abs(corners[0] - rect.x) <= 2 &&
-        Math.abs(corners[1] - rect.y) <= 2 &&
-        Math.abs(corners[2] - (rect.x + rect.width)) <= 2 &&
-        Math.abs(corners[3] - (rect.y + rect.height)) <= 2 &&
-        ink(ref)
-      ) {
-        return true;
-      }
-    }
-  }
-  return false;
+  return placedXObjectAt(objects, pages, pageIndex, rect, (_ref, body) =>
+    /\b(Tj|TJ|BMC|re|Do)\b|[-\d.]+\s+[-\d.]+\s+(m|c|v|y)\b|\b[SsFf]\b/.test(body)
+  );
+}
+
+/**
+ * Burned-in text bound to its drawing object: the page must draw an XObject
+ * at the approved rect carrying the value, so identical text that already
+ * lived on the page cannot satisfy the readback for a write that never landed.
+ */
+function placedTextPresent(
+  objects: Map<string, QdfObject>,
+  pages: string[],
+  pageIndex: number,
+  rect: PdfRect,
+  marker: string
+): boolean {
+  return placedXObjectAt(objects, pages, pageIndex, rect, (_ref, body) => body.includes(marker));
 }
 
 /** Field appearance drawn at the widget's own rect, for burned-in button fields. */
@@ -925,7 +962,7 @@ function checkBurnedFieldReadback(
     if (expected === "") return { applied: true };
     const marker = contentMarker(expected);
     for (const widget of field.widgets) {
-      if (!pageContentText(objects, pages, widget.page).text.includes(marker)) {
+      if (!placedTextPresent(objects, pages, widget.page, widget.rect, marker)) {
         return { applied: false, detail: "content" };
       }
     }
@@ -951,7 +988,7 @@ function checkBurnedPlacementReadback(
   entry: FormPlanPlacement
 ): boolean {
   if (entry.kind === "text") {
-    return pageContentText(objects, pages, entry.page).text.includes(contentMarker(entry.text));
+    return placedTextPresent(objects, pages, entry.page, entry.rect, contentMarker(entry.text));
   }
   return placedInkPresent(objects, pages, entry.page, entry.rect);
 }
@@ -1052,9 +1089,9 @@ function outputTooLarge(path: string, maxOutputBytes: number): CompressionError 
 async function joinDocumentFields(
   workingPath: string,
   workspacePath: string,
-  calls: NativeCallOptions
+  calls: NativeCallOptions,
+  raw: QpdfJson
 ): Promise<JoinedForm> {
-  const { raw } = await readQpdfJson(workingPath, calls);
   const fieldsPath = join(workspacePath, "fields.json");
   const outcomePath = join(workspacePath, "inspect-outcome.json");
   const pdfEntries = await runInspectChild(
@@ -1086,7 +1123,7 @@ export async function inventoryFormFields(
   const workspace = await createTempWorkspace("pdf-fill-inspect-", options.workspaceParent);
   try {
     const admission = await admitFillSource(sourcePath, workspace.path, calls);
-    const joined = await joinDocumentFields(admission.workingPath, workspace.path, calls);
+    const joined = await joinDocumentFields(admission.workingPath, workspace.path, calls, admission.json);
     return {
       inventory: joined.inventory,
       qpdfVersion,
@@ -1143,7 +1180,7 @@ export async function checkFormPlan(
   const workspace = await createTempWorkspace("pdf-fill-check-", options.workspaceParent);
   try {
     const admission = await admitFillSource(sourcePath, workspace.path, calls);
-    const joined = await joinDocumentFields(admission.workingPath, workspace.path, calls);
+    const joined = await joinDocumentFields(admission.workingPath, workspace.path, calls, admission.json);
     const outstanding: FormPlanOutstandingEntry[] = [];
     validatePlanEntries(plan, joined, outstanding);
     return {
@@ -1214,7 +1251,7 @@ export async function verifyFormFill(
   const workspace = await createTempWorkspace("pdf-fill-verify-", options.workspaceParent);
   try {
     const admission = await admitFillSource(sourcePath, workspace.path, calls);
-    const joined = await joinDocumentFields(admission.workingPath, workspace.path, calls);
+    const joined = await joinDocumentFields(admission.workingPath, workspace.path, calls, admission.json);
     validatePlanEntries(plan, joined);
 
     const fieldEntries = plan.entries.filter(
@@ -1342,7 +1379,7 @@ export async function fillForm(options: FillFormOptions): Promise<FillSummary> {
   const stagingPath = join(dirname(options.destinationPath), `.pdf-fill-staging-${randomUUID()}.pdf`);
   try {
     const admission = await admitFillSource(readPath, workspace.path, calls);
-    const joined = await joinDocumentFields(admission.workingPath, workspace.path, calls);
+    const joined = await joinDocumentFields(admission.workingPath, workspace.path, calls, admission.json);
     const answered = validatePlanEntries(plan, joined);
     const values = new Map<string, string>();
     for (const entry of plan.entries) {
@@ -1473,10 +1510,10 @@ export async function fillForm(options: FillFormOptions): Promise<FillSummary> {
       );
     }
 
-    if (clearDestination) await unlink(options.destinationPath);
     await options.resourceCheck?.((await stat(finalPath)).size);
     await copyFile(finalPath, stagingPath);
     await options.resourceCheck?.(0);
+    if (clearDestination) await unlink(options.destinationPath);
     await publishNoClobber(stagingPath, options.destinationPath);
     const outputStat = await stat(options.destinationPath);
     const afterHash = await hashFile(readPath);
@@ -1548,8 +1585,7 @@ export async function burnInForm(options: BurnInFormOptions): Promise<BurnInSumm
   const stagingPath = join(dirname(options.destinationPath), `.pdf-burn-in-staging-${randomUUID()}.pdf`);
   try {
     const admission = await admitFillSource(options.sourcePath, workspace.path, calls);
-    const sourceJson = await readQpdfJson(admission.workingPath, calls);
-    const update = planFieldActionRemoval(sourceJson.raw);
+    const update = planFieldActionRemoval(admission.json);
     let updateJsonPath: string | undefined;
     if (Object.keys(update.objects).length > 0) {
       updateJsonPath = workspace.file("field-action-update.json");
@@ -1592,7 +1628,6 @@ export async function burnInForm(options: BurnInFormOptions): Promise<BurnInSumm
     const inspection = await validatePdfArtifact(flatPath, admission.inspection.pageCount, calls);
     const warnings = [
       ...admission.inspection.warnings,
-      ...sourceJson.warnings,
       ...stageWarnings,
       ...stageJson.warnings,
       ...flatWarnings,
@@ -1610,10 +1645,10 @@ export async function burnInForm(options: BurnInFormOptions): Promise<BurnInSumm
         .filter((ref): ref is string => ref !== undefined)
     ).size;
 
-    if (clearDestination) await unlink(options.destinationPath);
     await options.resourceCheck?.((await stat(flatPath)).size);
     await copyFile(flatPath, stagingPath);
     await options.resourceCheck?.(0);
+    if (clearDestination) await unlink(options.destinationPath);
     await publishNoClobber(stagingPath, options.destinationPath);
     const outputStat = await stat(options.destinationPath);
     if ((await hashFile(options.sourcePath)) !== sourceHash) {

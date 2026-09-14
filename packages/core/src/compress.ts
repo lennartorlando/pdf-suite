@@ -7,6 +7,7 @@ import { validatePdfInput } from "./validation.js";
 import { qpdfEngine } from "./engines/qpdf.js";
 import { ghostscriptEngine } from "./engines/ghostscript.js";
 import {
+  assertAdmissibleFor,
   defaultNativeRunner,
   inspectPdfSource,
   type NativeCallOptions,
@@ -61,6 +62,10 @@ export async function compressPdf(options: CompressionOptions): Promise<Compress
     timeoutMs: options.timeoutMs
   };
   const inspection = await inspectPdfSource(options.inputPath, calls);
+  assertAdmissibleFor(inspection, "compress", {
+    label: "Source PDF",
+    details: { inputPath: options.inputPath }
+  });
   if (inspection.compatWarnings.includes("forms")) {
     throw new CompressionError(
       "INPUT_HAS_FORM_FIELDS",

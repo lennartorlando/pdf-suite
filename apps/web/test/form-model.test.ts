@@ -103,6 +103,22 @@ describe("form model: field edits are immutable", () => {
     expect(state.fields["11 0 R"].value).toBe("Off");
   });
 
+  it("toggles a checkbox whose inventory lists Off before its on-state", () => {
+    const check = field({
+      fieldId: "19 0 R",
+      type: "checkbox",
+      allowedValues: [
+        { text: "Off", documentDerived: true },
+        { text: "Ja", documentDerived: true }
+      ]
+    });
+    let state = createFormState(inventory([check]));
+    state = toggleCheckbox(state, "19 0 R");
+    expect(state.fields["19 0 R"]).toEqual({ status: "answered", value: "Ja" });
+    state = toggleCheckbox(state, "19 0 R");
+    expect(state.fields["19 0 R"].value).toBe("Off");
+  });
+
   it("chooses a radio export value", () => {
     const state = chooseOption(base(), "12 0 R", "B");
     expect(state.fields["12 0 R"]).toEqual({ status: "answered", value: "B" });

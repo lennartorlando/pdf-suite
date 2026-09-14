@@ -1,8 +1,9 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { burnInForm, fillForm, inventoryFormFields, type FillFormOptions, type FillSummary } from "../src/forms.js";
+import { burnInForm, fillForm, inventoryFormFields, verifyFormFill, type FillFormOptions, type FillSummary } from "../src/forms.js";
+import { CompressionError } from "../src/errors.js";
 import { FormPlanError, serializeFormPlan, parseFormPlan, type FormPlanEntry } from "../src/form-plan.js";
 import { defaultNativeRunner, type NativeRunner } from "../src/engines/qpdf-pages.js";
 import { outputContainsMarker, readFieldRows } from "../../../tests/helpers/pdf-assertions.js";
@@ -184,6 +185,19 @@ describe("inventoryFormFields", () => {
     expect(group).toBeDefined();
     expect(group?.widgets).toEqual([]);
   });
+
+  it("inspects the working copy with one qpdf --json pass, not two", async () => {
+    const source = await writeSource("inv-once", { formTextField: true });
+    let jsonCalls = 0;
+    const countingRun: NativeRunner = (command, args, options) => {
+      if (command === "qpdf" && args.includes("--json")) jsonCalls += 1;
+      return defaultNativeRunner(command, args, options);
+    };
+    const { inventory } = await inventoryFormFields(source, { workspaceParent, run: countingRun });
+    expect(inventory.fields).toHaveLength(1);
+    expect(jsonCalls).toBe(1);
+    await workspaceIsEmpty();
+  });
 });
 
 describe("fillForm rejections", () => {
@@ -219,6 +233,26 @@ describe("fillForm rejections", () => {
 
   it("refuses a read-only field", async () => {
     const source = await writeSource("rej-ro", { formTextField: true, formReadOnly: true });
+    const fieldId = await fieldIdOf(source);
+    await expectFillError(
+      source,
+      [{ kind: "field", fieldId, status: "answered", value: "x" }],
+      "FILL_NOT_FILLABLE"
+    );
+  });
+
+  it("refuses a password field", async () => {
+    const source = await writeSource("rej-pw", { formTextField: true, formPassword: true });
+    const fieldId = await fieldIdOf(source);
+    await expectFillError(
+      source,
+      [{ kind: "field", fieldId, status: "answered", value: "x" }],
+      "FILL_NOT_FILLABLE"
+    );
+  });
+
+  it("refuses a hidden field", async () => {
+    const source = await writeSource("rej-hidden", { formTextField: true, formHiddenWidget: true });
     const fieldId = await fieldIdOf(source);
     await expectFillError(
       source,
@@ -541,6 +575,39 @@ describe("fillForm terminal-state hygiene", () => {
     await workspaceIsEmpty();
   });
 
+  it("reports a burned-in write masked by identical pre-existing page text as not applied", async () => {
+    // The page already draws "Approved" inline; an artifact that never
+    // carried the approved write must fail readback instead of borrowing
+    // that literal from elsewhere on the page.
+    const source = await writeSource("fail-masked", { formTextField: true }, [{ label: "Approved" }]);
+    const fieldId = await fieldIdOf(source);
+    const fake = join(scratch, `${unique("masked-out")}.pdf`);
+    await copyFile(source, fake);
+    const plan = parseFormPlan({
+      version: 1,
+      source,
+      destination: fake,
+      overwrite: false,
+      burnIn: true,
+      nonce: `n-${counter}`,
+      entries: [
+        { kind: "field", fieldId, status: "answered", value: "Approved" },
+        {
+          kind: "text",
+          source,
+          page: 1,
+          rect: { x: 120, y: 500, width: 160, height: 20 },
+          text: "Approved"
+        }
+      ]
+    });
+    const verification = await verifyFormFill(plan, source, fake, { workspaceParent });
+    expect(verification.allApplied).toBe(false);
+    expect(verification.fields[0]?.applied).toBe(false);
+    expect(verification.placements[0]?.applied).toBe(false);
+    await workspaceIsEmpty();
+  });
+
   it("cancels cleanly with a pre-aborted signal", async () => {
     const source = await writeSource("fail-cancel", { formTextField: true });
     const controller = new AbortController();
@@ -562,6 +629,59 @@ describe("fillForm terminal-state hygiene", () => {
       fillForm({ sourcePath: source, planPath, destinationPath: outputPath, timeoutMs: 1, workspaceParent })
     ).rejects.toMatchObject({ code: "JOB_TIMEOUT" });
     await expect(stat(outputPath)).rejects.toThrow();
+    await workspaceIsEmpty();
+  });
+});
+
+describe("approved overwrite keeps the destination until publish", () => {
+  // The staged output is copied into the workspace before the destination is
+  // unlinked; a failure between the copy and the atomic publish must leave the
+  // person's original file in place.
+  const quotaProbe = async (bytes?: number): Promise<void> => {
+    if (bytes !== undefined && bytes > 0) {
+      throw new CompressionError("TEMP_QUOTA_EXCEEDED", "staging quota probe");
+    }
+  };
+
+  it("fillForm keeps the original destination when staging fails", async () => {
+    const source = await writeSource("ow-fill", { formTextField: true });
+    const fieldId = await fieldIdOf(source);
+    const outputPath = join(scratch, `${unique("ow")}.pdf`);
+    await writeFile(outputPath, "the person's original file");
+    const planPath = await writePlan(unique("plan"), source, outputPath, [
+      { kind: "field", fieldId, status: "answered", value: "x" }
+    ], { overwrite: true });
+    await expect(
+      fillForm({
+        sourcePath: source,
+        planPath,
+        destinationPath: outputPath,
+        workspaceParent,
+        resourceCheck: quotaProbe
+      })
+    ).rejects.toMatchObject({ code: "TEMP_QUOTA_EXCEEDED" });
+    expect((await readFile(outputPath)).toString()).toBe("the person's original file");
+    await workspaceIsEmpty();
+  });
+
+  it("burnInForm keeps the original destination when staging fails", async () => {
+    const source = await writeSource("ow-burn", { formTextField: true });
+    const fieldId = await fieldIdOf(source);
+    const { outputPath: interactive } = await fill(source, [
+      { kind: "field", fieldId, status: "answered", value: "burn me" }
+    ]);
+    const flatPath = join(scratch, `${unique("owflat")}.pdf`);
+    await writeFile(flatPath, "the person's original file");
+    await expect(
+      burnInForm({
+        sourcePath: interactive,
+        destinationPath: flatPath,
+        overwrite: true,
+        workspaceParent,
+        resourceCheck: quotaProbe
+      })
+    ).rejects.toMatchObject({ code: "TEMP_QUOTA_EXCEEDED" });
+    expect((await readFile(flatPath)).toString()).toBe("the person's original file");
     await workspaceIsEmpty();
   });
 });

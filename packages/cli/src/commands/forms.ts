@@ -1096,7 +1096,15 @@ async function runFormsClean(args: string[], deps: FormsCommandDeps): Promise<Cl
     resolve(options.auditPath ?? auditPathFor(options.planPath))
   ];
   const removed: string[] = [];
+  const attempted: string[] = [];
   for (const target of targets) {
+    try {
+      await stat(target);
+    } catch {
+      // Nothing existed to remove; an absent file is neither removed nor failed.
+      continue;
+    }
+    attempted.push(target);
     try {
       await rm(target, { force: true });
       removed.push(target);
@@ -1104,7 +1112,7 @@ async function runFormsClean(args: string[], deps: FormsCommandDeps): Promise<Cl
       // A file that cannot be removed is reported, not hidden.
     }
   }
-  const failed = targets.filter((target) => !removed.includes(target));
+  const failed = attempted.filter((target) => !removed.includes(target));
   if (options.json) {
     return {
       exitCode: 0,

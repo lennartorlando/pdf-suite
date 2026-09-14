@@ -153,6 +153,8 @@ export function createFormFiller(deps: FormFillerDeps): FormFillerHandle {
   let selectedPlacement: string | null = null;
   let activeField: string | null = null;
   let exporting = false;
+  let approving = false;
+  let opening = false;
   let shortcutEnabled = true;
   let pendingPlan: FormPlan | null = null;
   const objectUrls = new Set<string>();
@@ -422,6 +424,10 @@ export function createFormFiller(deps: FormFillerDeps): FormFillerHandle {
   }
 
   function setState(next: FormFillState, options: { rebuildOverlay?: boolean } = {}): void {
+    // While an export or approval derives its plan from a state snapshot, edits
+    // are frozen: a change accepted now would be left out of the artifact the
+    // save marks clean.
+    if (exporting || approving) return;
     state = next;
     unsavedDot.hidden = !next.dirty;
     renderFieldList();
@@ -670,13 +676,15 @@ export function createFormFiller(deps: FormFillerDeps): FormFillerHandle {
     const myGeneration = ++generation;
     renderTask?.cancel();
     renderTask = null;
+    let handle: FormPageHandle;
     try {
-      pageHandle = await doc.getPage(currentPage);
+      handle = await doc.getPage(currentPage);
     } catch {
       if (myGeneration === generation) notice("This page could not be rendered.");
       return;
     }
     if (destroyed || myGeneration !== generation) return;
+    pageHandle = handle;
     const scale = fitScale();
     const geo = currentGeometry(scale);
     if (!geo) return;
@@ -739,7 +747,8 @@ export function createFormFiller(deps: FormFillerDeps): FormFillerHandle {
   /* ------------------------------ actions ------------------------------- */
 
   async function openFile(file: File): Promise<void> {
-    if (destroyed) return;
+    if (destroyed || opening) return;
+    opening = true;
     pickStatus.textContent = "Opening document and reading its fields...";
     const controller = new AbortController();
     controllers.add(controller);
@@ -784,6 +793,7 @@ export function createFormFiller(deps: FormFillerDeps): FormFillerHandle {
     } catch (error) {
       pickStatus.textContent = error instanceof Error ? error.message : "The document could not be opened.";
     } finally {
+      opening = false;
       controllers.delete(controller);
     }
   }
@@ -817,7 +827,7 @@ export function createFormFiller(deps: FormFillerDeps): FormFillerHandle {
   }
 
   async function exportPdf(): Promise<void> {
-    if (!state || !sourceFile || exporting) return;
+    if (!state || !sourceFile || exporting || approving) return;
     exporting = true;
     exportButton.disabled = true;
     const controller = new AbortController();
@@ -851,16 +861,21 @@ export function createFormFiller(deps: FormFillerDeps): FormFillerHandle {
   }
 
   async function approvePlan(): Promise<void> {
-    if (!state || !sourceBytes) return;
-    const plan = derivePlan(state);
-    const planBytes = serializeFormPlan(plan);
-    const planDigest = await sha256Hex(planBytes);
-    const sourceDigest = await sha256Hex(sourceBytes);
-    const receipt = buildReceipt(plan.nonce, planDigest, sourceDigest);
-    downloadFile("plan.approved.json", new Blob([planBytes], { type: "application/json" }));
-    downloadFile("plan.approved.receipt.json", new Blob([serializeReceipt(receipt)], { type: "application/json" }));
-    state = markSaved(state);
-    unsavedDot.hidden = true;
+    if (!state || !sourceBytes || exporting || approving) return;
+    approving = true;
+    try {
+      const plan = derivePlan(state);
+      const planBytes = serializeFormPlan(plan);
+      const planDigest = await sha256Hex(planBytes);
+      const sourceDigest = await sha256Hex(sourceBytes);
+      const receipt = buildReceipt(plan.nonce, planDigest, sourceDigest);
+      downloadFile("plan.approved.json", new Blob([planBytes], { type: "application/json" }));
+      downloadFile("plan.approved.receipt.json", new Blob([serializeReceipt(receipt)], { type: "application/json" }));
+      state = markSaved(state);
+      unsavedDot.hidden = true;
+    } finally {
+      approving = false;
+    }
   }
 
   /* ------------------------------ lifecycle ----------------------------- */

@@ -3,6 +3,7 @@ import { copyFile, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { CompressionError } from "./errors.js";
 import {
+  assertAdmissibleFor,
   inspectPdfSource,
   publishNoClobber,
   validatePdfArtifact,
@@ -109,22 +110,10 @@ export async function ocrPdf(options: OcrPdfOptions): Promise<OcrSummary> {
     timeoutMs: options.timeoutMs ?? DEFAULT_OCR_TIMEOUT_MS
   };
   const inspection = await inspectPdfSource(options.inputPath, calls);
-  if (inspection.encrypted) {
-    throw new CompressionError("INPUT_ENCRYPTED", "Source PDF is encrypted.", {
-      inputPath: options.inputPath
-    });
-  }
-  if (inspection.signed) {
-    throw new CompressionError("INPUT_SIGNED", "Source PDF carries a digital signature.", {
-      inputPath: options.inputPath
-    });
-  }
-  if (inspection.activeContent.length > 0) {
-    throw new CompressionError("INPUT_HAS_ACTIVE_CONTENT", "Source PDF contains blocked active content.", {
-      inputPath: options.inputPath,
-      activeContent: inspection.activeContent
-    });
-  }
+  assertAdmissibleFor(inspection, "ocr", {
+    label: "Source PDF",
+    details: { inputPath: options.inputPath }
+  });
 
   const workspace = await createTempWorkspace("pdf-ocr-", options.workspaceParent);
   const stagingPath = join(dirname(options.outputPath), `.pdf-ocr-staging-${randomUUID()}.pdf`);

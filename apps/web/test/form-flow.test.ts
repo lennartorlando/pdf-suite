@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FormFieldEntry } from "@pdf-compressor/core/form-inventory";
 import { serializeFormPlan, type FormPlan } from "@pdf-compressor/core/form-plan";
 import { createFormFiller, layoutFor } from "../src/components/FormFiller.js";
-import type { FormDocumentHandle, FormPageInfo } from "../src/form/page-render.js";
+import type { FormDocumentHandle, FormPageHandle, FormPageInfo } from "../src/form/page-render.js";
 import { resetAuthStateForTests } from "../src/api/client.js";
 
 const PAGE_W = 595.28;
@@ -519,6 +519,176 @@ describe("fill surface: no browser storage", () => {
     await tick();
     expect(localStorage.length).toBe(0);
     expect(sessionStorage.length).toBe(0);
+    harness.destroy();
+  });
+});
+
+describe("fill surface: async lifecycle", () => {
+  it("keeps the current page's geometry when a stale getPage resolves late", async () => {
+    const gated = new Set<number>();
+    const resolvers = new Map<number, () => void>();
+    const makePage = (pageNumber: number): FormPageHandle => {
+      const width = pageNumber === 2 ? 1190.56 : PAGE_W;
+      return {
+        info: { viewBox: [0, 0, width, PAGE_H], rotation: 0, width, height: PAGE_H },
+        render: (_canvas: HTMLCanvasElement, _scale: number) => ({
+          done: Promise.resolve(),
+          cancel: vi.fn()
+        })
+      };
+    };
+    const handle: FormDocumentHandle = {
+      pageCount: 2,
+      getPage: (pageNumber: number) =>
+        gated.has(pageNumber)
+          ? new Promise<FormPageHandle>((resolve) =>
+              resolvers.set(pageNumber, () => resolve(makePage(pageNumber)))
+            )
+          : Promise.resolve(makePage(pageNumber)),
+      destroy: () => undefined
+    };
+    const submitFill = vi.fn(async () => ({ ok: true, downloadUrl: "/api/outputs/abc/download" }));
+    const filler = createFormFiller({
+      onExit: vi.fn(),
+      openDocument: async () => handle,
+      fetchInventory: vi.fn(async () => ({ ok: true, inventory: inventory([]) })),
+      submitFill,
+      download: vi.fn(async () => new Blob(["pdf"]))
+    });
+    document.body.append(filler.element);
+    await openPdf(filler.element);
+
+    const buttons = [...filler.element.querySelectorAll<HTMLButtonElement>(".canvas-head button")];
+    const prev = buttons.find((node) => node.textContent === "‹");
+    const next = buttons.find((node) => node.textContent === "›");
+    // Page 2's getPage stays pending while the person flips back to page 1;
+    // the stale resolution must not overwrite the page-1 geometry.
+    gated.add(2);
+    next?.click();
+    await tick(2);
+    prev?.click();
+    await tick(2);
+    resolvers.get(2)?.();
+    await tick(2);
+    expect(filler.element.querySelector(".canvas-head strong")?.textContent).toBe("Page 1 of 2");
+
+    clickTool(filler.element, "Check");
+    filler.element.querySelector<HTMLElement>(".hit-layer")?.dispatchEvent(
+      new MouseEvent("click", { clientX: 50, clientY: 60, bubbles: true })
+    );
+    await tick(2);
+    const createButton = [...filler.element.querySelectorAll<HTMLButtonElement>(".fill-bar .button")].find(
+      (node) => node.textContent === "Create PDF"
+    );
+    createButton?.click();
+    await tick();
+    const plan = submitFill.mock.calls[0][1] as FormPlan;
+    const check = plan.entries.find((entry) => entry.kind === "checkmark");
+    // Scale 1 over the 595.28-wide page 1: a click at 50px lands at user x 50.
+    // A stale page-2 handle (1190.56 wide) would scale 0.588 and land near 85.
+    expect(check && check.kind === "checkmark" ? check.rect.x : 0).toBe(50);
+    filler.destroy();
+  });
+
+  it("ignores a second file pick while the first open is still in flight", async () => {
+    const doc = fakeDoc([{}]);
+    let releaseDoc!: (handle: FormDocumentHandle) => void;
+    const gate = new Promise<FormDocumentHandle>((resolve) => {
+      releaseDoc = resolve;
+    });
+    const openDocument = vi.fn(() => gate);
+    const filler = createFormFiller({
+      onExit: vi.fn(),
+      openDocument,
+      fetchInventory: vi.fn(async () => ({ ok: true, inventory: inventory([NAME]) })),
+      submitFill: vi.fn(async () => ({ ok: true })),
+      download: vi.fn(async () => new Blob(["pdf"]))
+    });
+    document.body.append(filler.element);
+    const input = filler.element.querySelector<HTMLInputElement>('.fill-pick input[type="file"]')!;
+    const pick = (name: string): void => {
+      Object.defineProperty(input, "files", { value: [makePdfFile(name)], configurable: true });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    pick("first.pdf");
+    await tick(2);
+    pick("second.pdf");
+    await tick(2);
+    releaseDoc(doc.handle);
+    await tick();
+    // The second pick never reaches the loader; no stale handle is created.
+    expect(openDocument).toHaveBeenCalledTimes(1);
+    expect(filler.element.querySelector(".fill-bar strong")?.textContent).toBe("first.pdf");
+    filler.destroy();
+  });
+
+  it("freezes edits while an export is in flight so nothing extra is marked saved", async () => {
+    let releaseFill!: (result: { ok: boolean; downloadUrl?: string }) => void;
+    const gate = new Promise<{ ok: boolean; downloadUrl?: string }>((resolve) => {
+      releaseFill = resolve;
+    });
+    const submitFill = vi.fn(() => gate);
+    const filler = createFormFiller({
+      onExit: vi.fn(),
+      openDocument: fakeDoc([{}]).openDocument,
+      fetchInventory: vi.fn(async () => ({ ok: true, inventory: inventory([NAME]) })),
+      submitFill,
+      download: vi.fn(async () => new Blob(["pdf"], { type: "application/pdf" }))
+    });
+    document.body.append(filler.element);
+    await openPdf(filler.element);
+    const input = filler.element.querySelector<HTMLInputElement>('.overlay-layer [data-field-id="10 0 R"] input')!;
+    input.value = "Ada";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await tick(2);
+    expect(filler.element.querySelector(".unsaved-dot")?.hasAttribute("hidden")).toBe(false);
+
+    const createButton = [...filler.element.querySelectorAll<HTMLButtonElement>(".fill-bar .button")].find(
+      (node) => node.textContent === "Create PDF"
+    );
+    createButton?.click();
+    await tick(2);
+    // An edit while the export awaits its response never reaches the snapshot.
+    input.value = "late";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await tick(2);
+    releaseFill({ ok: true, downloadUrl: "/api/outputs/x/download" });
+    await tick();
+
+    const plan = submitFill.mock.calls[0][1] as FormPlan;
+    expect(plan.entries[0]).toMatchObject({ status: "answered", value: "Ada" });
+    const row = [...filler.element.querySelectorAll<HTMLElement>(".field-list .field")].find((node) =>
+      node.textContent?.includes("Name")
+    );
+    expect(row?.textContent).toContain("Ada");
+    expect(row?.textContent).not.toContain("late");
+    expect(filler.element.querySelector(".unsaved-dot")?.hasAttribute("hidden")).toBe(true);
+    filler.destroy();
+  });
+
+  it("freezes edits while an approval mints its receipt", async () => {
+    const harness = createHarness([NAME]);
+    await openPdf(harness.element);
+    const input = harness.element.querySelector<HTMLInputElement>('.overlay-layer [data-field-id="10 0 R"] input')!;
+    input.value = "Ada";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await tick(2);
+
+    const approve = [...harness.element.querySelectorAll<HTMLButtonElement>("button")].find((node) =>
+      node.textContent?.includes("Approve plan")
+    );
+    approve?.click();
+    // The receipt's digest awaits suspend here; an edit dispatched now races
+    // the snapshot the approval is about to mark clean.
+    input.value = "late";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await tick();
+
+    const row = [...harness.element.querySelectorAll<HTMLElement>(".field-list .field")].find((node) =>
+      node.textContent?.includes("Name")
+    );
+    expect(row?.textContent).toContain("Ada");
+    expect(row?.textContent).not.toContain("late");
     harness.destroy();
   });
 });

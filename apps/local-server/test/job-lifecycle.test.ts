@@ -253,6 +253,40 @@ describe("job lifecycle", () => {
     expect(after.status).toBe(404);
   });
 
+  it("replays a fill nonce only while its retained output lives", async () => {
+    let now = 1_000;
+    const manager = await JobManager.create({ tempRoot: join(scratch, "fill-nonce"), now: () => now });
+    const makeOutput = async (name: string) => {
+      const { dir } = await manager.newJobDir("fill-");
+      const outputPath = join(dir, `${name}.pdf`);
+      await writeFile(outputPath, Buffer.from("%PDF-1.4\n%EOF\n", "latin1"));
+      return manager.retainOutput({ sessionId: "s1", jobDir: dir, outputPath, pageCount: 1 });
+    };
+    const claim = { sessionId: "s1", planDigest: "p", sourceDigest: "s" };
+    try {
+      const first = await makeOutput("first");
+      expect(manager.resolveFillNonce("n1", claim).kind).toBe("claimed");
+      manager.completeFillNonce("n1", { status: 200, payload: {} }, first.handle);
+      expect(manager.resolveFillNonce("n1", claim).kind).toBe("replay");
+      // Downloaded once: the next identical submission reprocesses, never replays the dead handle.
+      expect(await manager.consume(first.handle, "s1")).toBe(true);
+      expect(manager.resolveFillNonce("n1", claim).kind).toBe("resume");
+
+      const second = await makeOutput("second");
+      manager.completeFillNonce("n1", { status: 200, payload: {} }, second.handle);
+      expect(manager.consumeSync(second.handle, "s1")).toBe(true);
+      expect(manager.resolveFillNonce("n1", claim).kind).toBe("resume");
+
+      const third = await makeOutput("third");
+      manager.completeFillNonce("n1", { status: 200, payload: {} }, third.handle);
+      now += LIMITS.outputTtlMs + 1;
+      await manager.sweepExpired();
+      expect(manager.resolveFillNonce("n1", claim).kind).toBe("resume");
+    } finally {
+      await manager.shutdown();
+    }
+  });
+
   it("expires retained outputs after TTL and removes their directories", async () => {
     const manager = await JobManager.create({ tempRoot: join(scratch, "ttl"), outputTtlMs: 40 });
     try {

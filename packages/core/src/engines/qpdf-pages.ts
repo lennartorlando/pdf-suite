@@ -246,6 +246,39 @@ export function isAdmissibleFor(
   return result.activeContent.length === 0;
 }
 
+/**
+ * The admission gate every non-fill operation shares (KTD4): routed
+ * through `isAdmissibleFor` so a classified condition added to the policy
+ * refuses everywhere at once. The first blocking condition names the
+ * refusal, keeping each documented error code.
+ */
+export function assertAdmissibleFor(
+  inspection: PdfInspection,
+  operation: Exclude<AdmissionOperation, "fill">,
+  source: { label: string; details: Record<string, unknown> }
+): void {
+  if (isAdmissibleFor(inspection, operation)) return;
+  const { label, details } = source;
+  if (inspection.encrypted) {
+    throw new CompressionError("INPUT_ENCRYPTED", `${label} is encrypted.`, details);
+  }
+  if (inspection.signed) {
+    throw new CompressionError("INPUT_SIGNED", `${label} carries a digital signature.`, details);
+  }
+  if (inspection.xfa) {
+    throw new CompressionError(
+      "INPUT_XFA",
+      `${label} uses XFA forms, which this operation cannot preserve.`,
+      { ...details, xfa: true }
+    );
+  }
+  throw new CompressionError(
+    "INPUT_HAS_ACTIVE_CONTENT",
+    `${label} contains blocked active content (${inspection.activeContent.join(", ")}).`,
+    { ...details, activeContent: inspection.activeContent }
+  );
+}
+
 function isDict(node: unknown): node is Record<string, unknown> {
   return typeof node === "object" && node !== null && !Array.isArray(node);
 }
@@ -289,6 +322,8 @@ interface ClassificationWalk {
   visited: Record<WalkName, Set<string>>;
   nodes: number;
   findings: Map<string, ActiveContentFinding>;
+  /** Dict keys the traversal treated as action edges, keyed by enclosing object. */
+  actionEdges: Map<string, Set<string>>;
 }
 
 function tick(walk: ClassificationWalk): void {
@@ -296,6 +331,12 @@ function tick(walk: ClassificationWalk): void {
   if (walk.nodes > CLASSIFIER_NODE_BUDGET) {
     throw incomplete(`traversal exceeded the ${CLASSIFIER_NODE_BUDGET} node budget`);
   }
+}
+
+function recordActionEdge(walk: ClassificationWalk, objKey: string, key: string): void {
+  const edges = walk.actionEdges.get(objKey) ?? new Set<string>();
+  edges.add(key);
+  walk.actionEdges.set(objKey, edges);
 }
 
 function recordFinding(
@@ -482,6 +523,7 @@ function traverseDict(
       continue;
     }
     if (key === "/AA") {
+      recordActionEdge(walk, objKey, key);
       traverseAdditionalActions(value, walk, ctx.walk, objKey);
       continue;
     }
@@ -490,6 +532,7 @@ function traverseDict(
       continue;
     }
     if (ACTION_EDGE_KEYS.has(key)) {
+      recordActionEdge(walk, objKey, key);
       traverseActionTarget(value, walk, ctx.walk, objKey, false);
       continue;
     }
@@ -565,6 +608,13 @@ export function classifyQpdfJson(raw: QpdfJson): {
   catalogReachable: Set<string>;
   /** Object references the field walk reached, including field-bound actions. */
   fieldReachable: Set<string>;
+  /**
+   * Dict keys the traversal treated as action edges, keyed by the enclosing
+   * object ("obj:N G R"). The cleanup stage removes exactly these edges —
+   * nothing reached under /AP, where the same key names are appearance
+   * states, is ever listed here.
+   */
+  actionEdges: Map<string, Set<string>>;
 } {
   const objects = raw.qpdf?.[1];
   if (raw.qpdf?.[0]?.jsonversion !== QPDF_JSON_VERSION || !isDict(objects)) {
@@ -584,7 +634,8 @@ export function classifyQpdfJson(raw: QpdfJson): {
     objects,
     visited: { catalog: new Set(), field: new Set(), orphan: new Set() },
     nodes: 0,
-    findings: new Map()
+    findings: new Map(),
+    actionEdges: new Map()
   };
   visitObject(rootRef, walk, { walk: "catalog", ...PLAIN });
   for (const ref of fieldRoots(raw, objects)) {
@@ -665,7 +716,8 @@ export function classifyQpdfJson(raw: QpdfJson): {
     activeContent: [...walk.findings.values()],
     compatWarnings,
     catalogReachable: new Set([...walk.visited.catalog].map((key) => key.slice(4))),
-    fieldReachable: new Set([...walk.visited.field].map((key) => key.slice(4)))
+    fieldReachable: new Set([...walk.visited.field].map((key) => key.slice(4))),
+    actionEdges: walk.actionEdges
   };
 }
 
@@ -753,12 +805,13 @@ export async function readQpdfJson(
  */
 export async function inspectPdfSource(
   sourcePath: string,
-  options: NativeCallOptions = {}
+  options: NativeCallOptions = {},
+  preRead?: { raw: QpdfJson; warnings: string[] }
 ): Promise<PdfInspection> {
   const qpdfVersion = await getQpdfVersion(options);
   assertNativeFloor("qpdf", qpdfVersion, QPDF_SECURITY_FLOOR);
 
-  const { raw: parsed, warnings } = await readQpdfJson(sourcePath, options);
+  const { raw: parsed, warnings } = preRead ?? await readQpdfJson(sourcePath, options);
   const classified = classifyQpdfJson(parsed);
   const { signed, xfa, usageRights, needsRendering, activeContent, compatWarnings } = classified;
   return {
@@ -785,6 +838,12 @@ export interface FillAdmission {
   workingPath: string;
   /** The unmodified inspector's result for the decrypted working copy. */
   inspection: PdfInspection;
+  /**
+   * The `qpdf --json` document the inspector already parsed for
+   * `workingPath`; callers reuse it instead of spawning a second
+   * inspection of the same bytes.
+   */
+  json: QpdfJson;
   /**
    * The source carried an /Encrypt dictionary, so the delivered file loses
    * the printing, copying and modification restrictions its author set: an
@@ -839,7 +898,8 @@ export async function admitFillSource(
   await chmod(workingPath, 0o600);
 
   try {
-    const inspection = await inspectPdfSource(workingPath, options);
+    const preRead = await readQpdfJson(workingPath, options);
+    const inspection = await inspectPdfSource(workingPath, options, preRead);
     if (inspection.signed) {
       throw new CompressionError("INPUT_SIGNED", "Source PDF carries a digital signature.", {
         inputPath: sourcePath
@@ -862,6 +922,7 @@ export async function admitFillSource(
     return {
       workingPath,
       inspection: { ...inspection, path: sourcePath },
+      json: preRead.raw,
       removedRestrictions: scan.encrypted,
       removedUsageRights: inspection.usageRights
     };
@@ -961,10 +1022,15 @@ export function planFieldActionRemoval(raw: QpdfJson): FieldActionUpdate {
   const updates: Record<string, { value: unknown }> = {};
   const strippedValues: unknown[] = [];
   for (const ref of stripCandidates) {
+    const edgeKeys = classified.actionEdges.get(`obj:${ref}`);
+    if (edgeKeys === undefined || edgeKeys.size === 0) continue;
     const entry = objects[`obj:${ref}`];
     if (!isDict(entry) || !isDict(entry["value"])) continue;
     const dict = entry["value"];
-    const dropped = Object.keys(dict).filter((key) => ACTION_REMOVAL_KEYS.has(key));
+    // Only keys the classifier followed as action edges are removed; the
+    // same key names mean appearance states inside an /AP dictionary and
+    // are data there.
+    const dropped = [...edgeKeys].filter((key) => key in dict);
     if (dropped.length === 0) continue;
     const cleaned = { ...dict };
     for (const key of dropped) {

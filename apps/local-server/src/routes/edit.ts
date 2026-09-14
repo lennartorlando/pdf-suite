@@ -208,6 +208,13 @@ export function sanitizeExportError(error: unknown): { status: number; code: str
         return { status: 499, code: error.code };
       case "JOB_TIMEOUT":
         return { status: 504, code: error.code };
+      default: {
+        // Compile-time exhaustiveness: a new CompressionErrorCode without a
+        // case fails typecheck here. At runtime an unrecognized code keeps
+        // its identity instead of being masked as a generic export failure.
+        const _exhaustive: never = error.code;
+        return { status: 500, code: _exhaustive };
+      }
     }
   }
   if (error instanceof Error) {
