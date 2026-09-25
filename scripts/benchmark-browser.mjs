@@ -25,6 +25,8 @@
  * page-editor-baseline.json, preserving the sibling sections each file's
  * other owner produced.
  */
+import { copyFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BENCHMARK_DIR,
@@ -243,23 +245,75 @@ if (invokedDirectly(import.meta.url)) {
         await openFillSurface(page, base, formCorpora.get("form-200.pdf"));
         await page.waitForFunction(probePageReady, { polling: 100 });
 
-        // A checkmark placement gives the drag measurements a target. The
-        // click is dispatched on the hit layer itself: the overlay and
-        // placement layers sit above it in the same stacking context, so a
-        // coordinate click would land on them and never reach the handler.
-        await clickToolButton(page, "Check");
-        await page.evaluate(() => {
+        /* Real pointer input through the browser's hit testing: a click at
+         * an element's on-screen coordinates must reach it, which fails when
+         * a covering layer swallows the pointer (the surface layers sit on
+         * top of the canvas and the hit layer in the same stacking
+         * context). The timed gesture loops below keep dispatching in-page
+         * because SC4 budgets the app's own work, not protocol overhead. */
+        const clickablePoint = async (selector) => {
+          const handle = await page.waitForSelector(selector);
+          await handle.evaluate((node) => node.scrollIntoView({ block: "center" }));
+          const rect = await handle.evaluate((node) => {
+            const box = node.getBoundingClientRect();
+            return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+          });
+          return rect;
+        };
+        // A paper point no interactive element covers; requires the empty
+        // areas of the surface layers to be transparent to the pointer.
+        const freeHitPoint = () => {
           const layer = document.querySelector(".hit-layer");
+          if (!layer || layer.hidden) return null;
+          layer.scrollIntoView({ block: "center" });
           const box = layer.getBoundingClientRect();
-          layer.dispatchEvent(
-            new MouseEvent("click", {
-              bubbles: true,
-              clientX: box.left + box.width / 2,
-              clientY: box.top + box.height / 2
-            })
-          );
-        });
-        await page.waitForSelector(".placement");
+          for (const fy of [0.5, 0.85, 0.15, 0.7, 0.3]) {
+            for (const fx of [0.5, 0.2, 0.8, 0.35, 0.65]) {
+              const x = box.left + box.width * fx;
+              const y = box.top + box.height * fy;
+              if (y < 0 || y > window.innerHeight || x < 0 || x > window.innerWidth) continue;
+              if (document.elementFromPoint(x, y) === layer) return { x, y };
+            }
+          }
+          return null;
+        };
+        try {
+          const point = await clickablePoint('.field-box input[type="text"], .field-box textarea');
+          await page.mouse.click(point.x, point.y);
+          await page.keyboard.type("probe-real");
+          const typed = await page.evaluate(() => document.activeElement?.value ?? "");
+          if (typed !== "probe-real") {
+            failures.push(`real pointer typing did not reach the field input (got ${JSON.stringify(typed)})`);
+          }
+        } catch (error) {
+          failures.push(`real pointer text-field fill failed: ${error.message}`);
+        }
+        try {
+          const checkboxSelector = '.field-box input[type="checkbox"]';
+          const point = await clickablePoint(checkboxSelector);
+          const before = await page.evaluate((sel) => document.querySelector(sel)?.checked, checkboxSelector);
+          await page.mouse.click(point.x, point.y);
+          const after = await page.evaluate((sel) => document.querySelector(sel)?.checked, checkboxSelector);
+          if (before === after) failures.push("real pointer click did not toggle the checkbox");
+        } catch (error) {
+          failures.push(`real pointer checkbox click failed: ${error.message}`);
+        }
+
+        // A checkmark placement gives the drag measurements a target, and a
+        // text placement proves the Text tool lands where the person clicks;
+        // both are created by real pointer clicks on the page.
+        for (const [tool, placementClass] of [["Check", ".placement--checkmark"], ["Text", ".placement--text"]]) {
+          try {
+            await clickToolButton(page, tool);
+            const point = await page.evaluate(freeHitPoint);
+            if (!point) throw new Error("no point on the page reaches the hit layer");
+            await page.mouse.click(point.x, point.y);
+            await page.waitForSelector(placementClass, { timeout: 5000 });
+          } catch (error) {
+            failures.push(`real pointer ${tool.toLowerCase()} placement failed: ${error.message}`);
+          }
+        }
+        await clickToolButton(page, "Fields");
 
         const apiRequests = [];
         page.on("request", (request) => {
@@ -319,6 +373,7 @@ if (invokedDirectly(import.meta.url)) {
             for (let i = 0; i < rounds; i += 1) {
               // Each commit rebuilds the layer's children; re-query the node.
               const node = layer.querySelector(".placement");
+              if (!node) break;
               const box = node.getBoundingClientRect();
               const x = box.left + 2;
               const y = box.top + 2;
@@ -335,10 +390,14 @@ if (invokedDirectly(import.meta.url)) {
           }
           return { moves, commits };
         }, GESTURE_SAMPLES);
-        formResults.dragMove = { operation: "drag-move-200-field", ...percentileStats(drag.moves) };
-        formResults.dragMove.gate = gate("dragMove", formResults.dragMove);
-        formResults.dragCommit = { operation: "drag-commit-200-field", ...percentileStats(drag.commits) };
-        formResults.dragCommit.gate = gate("dragCommit", formResults.dragCommit);
+        if (drag.moves.length === 0 || drag.commits.length === 0) {
+          failures.push("no placement exists to drag; drag gesture windows not measured");
+        } else {
+          formResults.dragMove = { operation: "drag-move-200-field", ...percentileStats(drag.moves) };
+          formResults.dragMove.gate = gate("dragMove", formResults.dragMove);
+          formResults.dragCommit = { operation: "drag-commit-200-field", ...percentileStats(drag.commits) };
+          formResults.dragCommit.gate = gate("dragCommit", formResults.dragCommit);
+        }
 
         requestsDuringGestures = apiRequests.length;
 
@@ -528,6 +587,33 @@ if (invokedDirectly(import.meta.url)) {
           ),
           samples: EXPORT_SAMPLES
         };
+
+        /* A long, unbreakable file name must not push the thumbnail's canvas
+         * and controls past the card's border (the card's grid column took
+         * the caption's min-content width). Layout regression check, ungated. */
+        const longNamePath = join(tmpdir(), "SEPA_Lastschrift_Mandat_251030_webB.pdf");
+        await copyFile(corpus20, longNamePath);
+        const { context: longNameContext, page: longNamePage } = await newContextPage(browser);
+        try {
+          await openEditorSurface(longNamePage, base, longNamePath);
+          await longNamePage.waitForFunction(probeThumbPainted, { polling: 100 });
+          const overflow = await longNamePage.evaluate(() => {
+            const bad = [];
+            for (const card of document.querySelectorAll(".thumb")) {
+              for (const child of card.querySelectorAll(".thumb__canvas, .thumb__controls")) {
+                if (child.offsetWidth > card.offsetWidth) {
+                  bad.push(`${child.className} ${child.offsetWidth}px overflows card ${card.offsetWidth}px`);
+                }
+              }
+            }
+            return bad;
+          });
+          for (const item of overflow.slice(0, 5)) {
+            failures.push(`thumbnail card overflowed by a long file name: ${item}`);
+          }
+        } finally {
+          await longNameContext.close();
+        }
       } finally {
         await context.close();
       }

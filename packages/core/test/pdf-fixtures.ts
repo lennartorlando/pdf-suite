@@ -48,6 +48,8 @@ export interface FixtureFeatures {
   signatureField?: boolean;
   pageLabels?: boolean;
   tags?: boolean;
+  /** Tagged document: a structure tree whose elements carry /A attribute objects (§14.7.2). */
+  taggedStructure?: boolean;
   javascript?: boolean;
   openAction?: boolean;
   additionalActions?: boolean;
@@ -408,6 +410,31 @@ export function buildTestPdf(pages: FixturePage[], features: FixtureFeatures = {
   if (features.tags) {
     const structTree = extra("<< /Type /StructTreeRoot /ParentTree << /Nums [] >> >>");
     catalogExtras.push(`/StructTreeRoot ${structTree} 0 R /MarkInfo << /Marked true >>`);
+  }
+  if (features.taggedStructure) {
+    const rootId = nextId++;
+    const tableId = nextId++;
+    const rowId = nextId++;
+    const cellId = nextId++;
+    const tableAttrs = extra("<< /O /Table /ColSpan 8 /RowSpan 2 >>");
+    const layoutAttrs = extra("<< /O /Layout /BBox [0 0 300 60] /Placement /Block >>");
+    bodies.set(
+      rootId,
+      `<< /Type /StructTreeRoot /K ${tableId} 0 R /ParentTree << /Nums [] >> >>`
+    );
+    bodies.set(
+      tableId,
+      `<< /Type /StructElem /S /Table /P ${rootId} 0 R /K ${rowId} 0 R /A ${tableAttrs} 0 R >>`
+    );
+    bodies.set(
+      rowId,
+      `<< /Type /StructElem /S /TR /P ${tableId} 0 R /K ${cellId} 0 R /A [${layoutAttrs} 0 R 0] >>`
+    );
+    bodies.set(
+      cellId,
+      `<< /Type /StructElem /S /TD /P ${rowId} 0 R /K 0 /A << /O /Layout /SpaceBefore 4 >> >>`
+    );
+    catalogExtras.push(`/StructTreeRoot ${rootId} 0 R /MarkInfo << /Marked true >>`);
   }
 
   bodies.set(catalogId, `<< /Type /Catalog /Pages ${pagesId} 0 R${catalogExtras.length ? ` ${catalogExtras.join(" ")}` : ""} >>`);

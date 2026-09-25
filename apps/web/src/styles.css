@@ -277,6 +277,9 @@ h1 {
   display: flex;
   align-items: center;
   gap: 6px;
+  /* Grid item of .thumb: without a zero minimum its unbreakable caption
+   * min-content widens the card's implicit column past the grid track. */
+  min-width: 0;
 }
 
 .thumb__caption {
@@ -619,7 +622,16 @@ h1 {
   inset: 0;
 }
 
+/* The overlay and placement containers span the page but only their
+ * interactive children may catch the pointer: otherwise the topmost empty
+ * layer swallows every click meant for a field box or the hit layer. */
+.overlay-layer,
+.placement-layer {
+  pointer-events: none;
+}
+
 .field-box {
+  pointer-events: auto;
   position: absolute;
   display: flex;
   padding: 1px;
@@ -655,11 +667,14 @@ h1 {
 
 .field-box input[type="checkbox"],
 .field-box input[type="radio"] {
-  flex: 0;
+  /* Keep the control at its intrinsic size, centred — flex-basis 0 would
+   * collapse it to a zero-width, unclickable sliver. */
+  flex: 0 0 auto;
   margin: auto;
 }
 
 .placement {
+  pointer-events: auto;
   position: absolute;
   border: 2px solid #1f7a5c;
   border-radius: 4px;

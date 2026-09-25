@@ -228,12 +228,20 @@ export interface FormInventoryResponse {
 export async function inventoryForm(file: File, signal?: AbortSignal): Promise<FormInventoryResponse> {
   const form = new FormData();
   form.append("source", file, "source.pdf");
-  const response = await authedFetch("/api/forms/inventory?reveal=values", {
-    method: "POST",
-    body: form,
-    signal
-  });
-  return response.json() as Promise<FormInventoryResponse>;
+  // A 429 means another native operation holds the single slot — most often
+  // the capability probe a surface switch just fired — so retry with the
+  // same bounded backoff fill uses rather than stranding the picker.
+  for (let attempt = 0; ; attempt += 1) {
+    const response = await authedFetch("/api/forms/inventory?reveal=values", {
+      method: "POST",
+      body: form,
+      signal
+    });
+    if (response.status !== 429 || attempt >= BUSY_RETRY_DELAYS_MS.length) {
+      return response.json() as Promise<FormInventoryResponse>;
+    }
+    await sleep(BUSY_RETRY_DELAYS_MS[attempt], signal);
+  }
 }
 
 export interface FillFormResult {
@@ -258,10 +266,10 @@ export interface FillFormResult {
 /**
  * Busy-retry delays for a native-slot 429. The slot is released when the
  * in-flight job settles, so short bounded waits are enough; the plan's nonce
- * makes a retried upload idempotent (KTD18), and the same FormData replays
- * the authentication retry inside `authedFetch` for free.
+ * makes a retried fill upload idempotent (KTD18), and the same FormData
+ * replays the authentication retry inside `authedFetch` for free.
  */
-const FILL_BUSY_DELAYS_MS = [400, 1200];
+const BUSY_RETRY_DELAYS_MS = [400, 1200];
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -289,9 +297,9 @@ export async function fillForm(file: File, plan: FormPlan, signal?: AbortSignal)
   form.append("source", file, "source.pdf");
   for (let attempt = 0; ; attempt += 1) {
     const response = await authedFetch("/api/forms/fill", { method: "POST", body: form, signal });
-    if (response.status !== 429 || attempt >= FILL_BUSY_DELAYS_MS.length) {
+    if (response.status !== 429 || attempt >= BUSY_RETRY_DELAYS_MS.length) {
       return response.json() as Promise<FillFormResult>;
     }
-    await sleep(FILL_BUSY_DELAYS_MS[attempt], signal);
+    await sleep(BUSY_RETRY_DELAYS_MS[attempt], signal);
   }
 }

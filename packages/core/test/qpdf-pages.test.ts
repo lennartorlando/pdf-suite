@@ -336,6 +336,201 @@ describe("active-content admission", () => {
   });
 });
 
+describe("tagged structure elements", () => {
+  // PDF 32000 §14.7.2: on a structure element /A names attribute objects —
+  // a dict, a reference, or an array of those interleaved with revision
+  // numbers — not an action. Tagged documents like accessible SEPA forms
+  // carry dozens of them and must not be refused.
+  function taggedDocument(
+    structTree: Record<string, unknown>,
+    extraObjects: Record<string, unknown> = {},
+    overrides: Record<string, unknown> = {}
+  ) {
+    return jsonDocument(
+      objectMap({
+        "obj:1 0 R": {
+          value: {
+            "/Type": "/Catalog",
+            "/Pages": "2 0 R",
+            "/MarkInfo": { "/Marked": true },
+            "/StructTreeRoot": "10 0 R"
+          }
+        },
+        "obj:10 0 R": { value: structTree },
+        ...extraObjects
+      }),
+      overrides
+    );
+  }
+
+  it("admits structure attribute objects in dict, reference and array form", () => {
+    const result = classifyQpdfJson(
+      taggedDocument(
+        { "/Type": "/StructTreeRoot", "/K": ["11 0 R"], "/ParentTree": { "/Nums": [] } },
+        {
+          "obj:11 0 R": {
+            value: {
+              "/Type": "/StructElem",
+              "/S": "/Table",
+              "/P": "10 0 R",
+              "/K": ["12 0 R", "15 0 R"],
+              "/A": "13 0 R"
+            }
+          },
+          "obj:12 0 R": {
+            value: {
+              "/Type": "/StructElem",
+              "/S": "/TD",
+              "/P": "11 0 R",
+              "/K": [0],
+              "/A": ["14 0 R", 0, { "/O": "/Table", "/ColSpan": 8 }]
+            }
+          },
+          "obj:13 0 R": {
+            value: { "/O": "/Layout", "/BBox": [0, 0, 300, 60], "/Placement": "/Block" }
+          },
+          "obj:14 0 R": { value: { "/O": "/Table", "/ColSpan": 8, "/RowSpan": 2 } },
+          "obj:15 0 R": {
+            value: {
+              "/S": "/P",
+              "/P": "11 0 R",
+              "/K": [1],
+              "/A": { "/O": "/Layout", "/SpaceBefore": 4 }
+            }
+          }
+        }
+      )
+    );
+    expect(result.activeContent).toEqual([]);
+    expect(result.compatWarnings).toContain("tags");
+  });
+
+  it("still refuses a link annotation action inside a tagged document", () => {
+    const result = classifyQpdfJson(
+      taggedDocument(
+        { "/Type": "/StructTreeRoot", "/K": ["11 0 R"] },
+        {
+          "obj:3 0 R": {
+            value: { "/Type": "/Page", "/Parent": "2 0 R", "/Annots": ["20 0 R"] }
+          },
+          "obj:11 0 R": {
+            value: { "/Type": "/StructElem", "/S": "/P", "/P": "10 0 R", "/K": [0], "/A": "13 0 R" }
+          },
+          "obj:13 0 R": { value: { "/O": "/Layout" } },
+          "obj:20 0 R": {
+            value: {
+              "/Type": "/Annot",
+              "/Subtype": "/Link",
+              "/Rect": [0, 0, 10, 10],
+              "/A": { "/S": "/JavaScript", "/JS": "u:app.alert(1)" }
+            }
+          }
+        }
+      )
+    );
+    expect(result.activeContent).toContain("/JavaScript@catalog");
+    expect(isAdmissibleFor(result, "fill")).toBe(false);
+  });
+
+  it("still flags a recognized action subtype inside a structure attribute object", () => {
+    const result = classifyQpdfJson(
+      taggedDocument(
+        { "/Type": "/StructTreeRoot", "/K": ["11 0 R"] },
+        {
+          "obj:11 0 R": {
+            value: {
+              "/Type": "/StructElem",
+              "/S": "/TD",
+              "/P": "10 0 R",
+              "/K": [0],
+              "/A": { "/O": "/Table", "/S": "/JavaScript", "/JS": "u:fixture()" }
+            }
+          }
+        }
+      )
+    );
+    expect(result.activeContent).toContain("/JavaScript@catalog");
+    expect(isAdmissibleFor(result, "fill")).toBe(false);
+  });
+
+  it("keeps a widget action reached through a structure-tree OBJR field-bound", () => {
+    const result = classifyQpdfJson(
+      taggedDocument(
+        { "/Type": "/StructTreeRoot", "/K": ["11 0 R"] },
+        {
+          "obj:3 0 R": {
+            value: { "/Type": "/Page", "/Parent": "2 0 R", "/Annots": ["6 0 R"] }
+          },
+          "obj:5 0 R": { value: { "/FT": "/Tx", "/T": "u:name", "/Kids": ["6 0 R"] } },
+          "obj:6 0 R": {
+            value: {
+              "/Type": "/Annot",
+              "/Subtype": "/Widget",
+              "/Parent": "5 0 R",
+              "/Rect": [100, 100, 200, 120],
+              "/AA": "7 0 R"
+            }
+          },
+          "obj:7 0 R": { value: { "/F": "9 0 R" } },
+          "obj:9 0 R": { value: { "/S": "/JavaScript", "/JS": "u:fixture()" } },
+          "obj:11 0 R": {
+            value: { "/Type": "/StructElem", "/S": "/Form", "/P": "10 0 R", "/K": ["12 0 R"] }
+          },
+          "obj:12 0 R": { value: { "/Type": "/OBJR", "/Obj": "6 0 R", "/Pg": "3 0 R" } }
+        },
+        {
+          acroform: {
+            hasacroform: true,
+            fields: [{ object: "6 0 R", annotation: { object: "6 0 R" }, parent: "5 0 R" }]
+          }
+        }
+      )
+    );
+    expect(result.activeContent).toEqual(["/JavaScript@field"]);
+    expect(isAdmissibleFor(result, "fill")).toBe(true);
+    expect(isAdmissibleFor(result, "compress")).toBe(false);
+  });
+
+  it("still walks a non-widget annotation reached through an OBJR", () => {
+    const result = classifyQpdfJson(
+      taggedDocument(
+        { "/Type": "/StructTreeRoot", "/K": ["11 0 R"] },
+        {
+          "obj:11 0 R": {
+            value: { "/Type": "/StructElem", "/S": "/P", "/P": "10 0 R", "/K": ["12 0 R"] }
+          },
+          "obj:12 0 R": { value: { "/Type": "/OBJR", "/Obj": "20 0 R", "/Pg": "3 0 R" } },
+          "obj:20 0 R": {
+            value: {
+              "/Type": "/Annot",
+              "/Subtype": "/Link",
+              "/Rect": [0, 0, 10, 10],
+              "/A": { "/S": "/JavaScript", "/JS": "u:app.alert(1)" }
+            }
+          }
+        }
+      )
+    );
+    expect(result.activeContent).toContain("/JavaScript@catalog");
+    expect(isAdmissibleFor(result, "fill")).toBe(false);
+  });
+
+  it("refuses an attribute-shaped dictionary that carries an action subtype outside the structure tree", () => {
+    const result = classifyQpdfJson(
+      jsonDocument(
+        objectMap({
+          "obj:1 0 R": {
+            value: { "/Type": "/Catalog", "/Pages": "2 0 R", "/OpenAction": "9 0 R" }
+          },
+          "obj:9 0 R": { value: { "/O": "/Table", "/S": "/JavaScript", "/JS": "u:fixture()" } }
+        })
+      )
+    );
+    expect(result.activeContent).toContain("/JavaScript@catalog");
+    expect(isAdmissibleFor(result, "fill")).toBe(false);
+  });
+});
+
 describe("field-action removal", () => {
   it("strips only classified action edges and keeps appearance resources named like action keys", () => {
     // A widget appearance dictionary may legitimately hold keys spelled like

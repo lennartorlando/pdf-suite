@@ -741,4 +741,58 @@ describe("fillForm client: bounded retries under one nonce", () => {
     expect(new Set(plans).size).toBe(1);
     expect(plans[0]).toContain('"nonce":"nonce-once"');
   });
+
+  it("inventoryForm retries a busy native slot instead of stranding the picker", async () => {
+    const { inventoryForm } = await import("../src/api/client.js");
+    let inventoryCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string): Promise<Response> => {
+        if (url === "/api/session/launch") {
+          return fillResponse({ ok: true, token: "t".padEnd(64, "x"), expiresInMs: 300_000 });
+        }
+        if (url === "/api/forms/inventory?reveal=values") {
+          inventoryCount += 1;
+          if (inventoryCount === 1) {
+            return {
+              ok: false,
+              status: 429,
+              json: async () => ({ ok: false, code: "NATIVE_BUSY", message: "Another native operation is in flight." })
+            } as Response;
+          }
+          return fillResponse({ ok: true, inventory: { version: 1, fields: [] } });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      })
+    );
+    const result = await inventoryForm(makePdfFile());
+    expect(result.ok).toBe(true);
+    expect(inventoryCount).toBe(2);
+  });
+
+  it("inventoryForm returns the busy answer once the bounded retries are spent", async () => {
+    const { inventoryForm } = await import("../src/api/client.js");
+    let inventoryCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string): Promise<Response> => {
+        if (url === "/api/session/launch") {
+          return fillResponse({ ok: true, token: "t".padEnd(64, "x"), expiresInMs: 300_000 });
+        }
+        if (url === "/api/forms/inventory?reveal=values") {
+          inventoryCount += 1;
+          return {
+            ok: false,
+            status: 429,
+            json: async () => ({ ok: false, code: "NATIVE_BUSY", message: "Another native operation is in flight." })
+          } as Response;
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      })
+    );
+    const result = await inventoryForm(makePdfFile());
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe("NATIVE_BUSY");
+    expect(inventoryCount).toBe(3);
+  });
 });

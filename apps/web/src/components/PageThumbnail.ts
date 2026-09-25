@@ -99,7 +99,9 @@ export function createPageThumbnail(data: ThumbnailData, callbacks: ThumbnailCal
     card.classList.toggle("thumb--rot90", next.rotation === 90);
     card.classList.toggle("thumb--rot180", next.rotation === 180);
     card.classList.toggle("thumb--rot270", next.rotation === 270);
-    caption.textContent = `${next.index + 1} · ${next.sourceName} · p${next.pageNumber}`;
+    const text = `${next.index + 1} · ${next.sourceName} · p${next.pageNumber}`;
+    caption.textContent = text;
+    caption.title = text;
     canvas.setAttribute("aria-label", `Page ${next.index + 1} from ${next.sourceName}`);
     rotationNote.textContent = next.rotation === 0 ? "" : `Rotated ${next.rotation}° clockwise`;
     rotationNote.hidden = next.rotation === 0;

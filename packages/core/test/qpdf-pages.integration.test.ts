@@ -7,6 +7,7 @@ import { CompressionError } from "../src/errors.js";
 import { assemblePages, inspectSources } from "../src/pages.js";
 import {
   defaultNativeRunner,
+  inspectPdfSource,
   type NativeRunner
 } from "../src/engines/qpdf-pages.js";
 import {
@@ -324,6 +325,20 @@ describe("qpdf page assembly integration", () => {
       }
       expect(log.mutations).toBe(0);
       await expectHashesUnchanged(await snapshot([aPath]));
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("admits a tagged document whose structure elements carry attribute objects", async () => {
+    const { dir, cleanup } = await makeDir();
+    try {
+      const path = await writeTestPdf(dir, "tagged.pdf", [{ width: 640 }], {
+        taggedStructure: true
+      });
+      const inspection = await inspectPdfSource(path);
+      expect(inspection.activeContent).toEqual([]);
+      expect(inspection.compatWarnings).toContain("tags");
     } finally {
       await cleanup();
     }

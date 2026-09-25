@@ -313,9 +313,24 @@ interface WalkContext {
    * edges — and its values are appearance streams, never actions.
    */
   appearance: boolean;
+  /**
+   * True inside the logical structure tree (PDF 32000 §14.7.2): on a
+   * structure element /A names attribute objects — a dict, a reference, or
+   * an array of those interleaved with revision numbers — not an action,
+   * and /K names child structure content. The context enters through the
+   * catalog's /StructTreeRoot edge or a /Type /StructElem dictionary and
+   * propagates only along those two edges, so leaving the tree (to a page
+   * via /Pg, an annotation via /Obj) returns to ordinary traversal.
+   */
+  structure: boolean;
 }
 
-const PLAIN: Omit<WalkContext, "walk"> = { action: false, aaMap: false, appearance: false };
+const PLAIN: Omit<WalkContext, "walk"> = {
+  action: false,
+  aaMap: false,
+  appearance: false,
+  structure: false
+};
 
 interface ClassificationWalk {
   objects: Record<string, unknown>;
@@ -381,7 +396,9 @@ function traverseNode(
   if (Array.isArray(node)) {
     // An array reached through an action edge is a destination, not a chain;
     // chain edges are only the /Next entry of a dict that is an action.
-    for (const element of node) traverseNode(element, walk, { walk: ctx.walk, ...PLAIN }, objKey);
+    for (const element of node) {
+      traverseNode(element, walk, { walk: ctx.walk, ...PLAIN, structure: ctx.structure }, objKey);
+    }
     return;
   }
   if (isDict(node)) traverseDict(node, walk, ctx, objKey);
@@ -398,7 +415,13 @@ function traverseActionTarget(
   tick(walk);
   if (typeof value === "string") {
     if (OBJECT_REF.test(value)) {
-      visitObject(value, walk, { walk: name, action: true, aaMap: false, appearance: false });
+      visitObject(value, walk, {
+        walk: name,
+        action: true,
+        aaMap: false,
+        appearance: false,
+        structure: false
+      });
     } else {
       recordFinding(walk, name, objKey, "action");
     }
@@ -415,29 +438,46 @@ function traverseActionTarget(
     return;
   }
   if (isDict(value)) {
-    traverseDict(value, walk, { walk: name, action: true, aaMap: false, appearance: false }, objKey);
+    traverseDict(
+      value,
+      walk,
+      { walk: name, action: true, aaMap: false, appearance: false, structure: false },
+      objKey
+    );
     return;
   }
   recordFinding(walk, name, objKey, "action");
 }
 
+/**
+ * One annotation target on the catalog walk, from a page's /Annots entry or
+ * a structure element's OBJR /Obj edge: widget annotations belong to the
+ * field walk (KTD4), every other annotation is walked here.
+ */
+function traverseCatalogAnnotation(
+  element: unknown,
+  walk: ClassificationWalk,
+  objKey: string
+): void {
+  tick(walk);
+  if (isDict(element)) {
+    if (element["/Subtype"] !== "/Widget") {
+      traverseDict(element, walk, { walk: "catalog", ...PLAIN }, objKey);
+    }
+    return;
+  }
+  if (typeof element === "string" && OBJECT_REF.test(element)) {
+    const target = objectNode(walk.objects[`obj:${element}`]);
+    if (isDict(target) && target["/Subtype"] === "/Widget") return;
+    visitObject(element, walk, { walk: "catalog", ...PLAIN });
+    return;
+  }
+  traverseNode(element, walk, { walk: "catalog", ...PLAIN }, objKey);
+}
+
 function traverseAnnotations(value: unknown, walk: ClassificationWalk, objKey: string): void {
   const visitElement = (element: unknown): void => {
-    tick(walk);
-    if (isDict(element)) {
-      // Widget annotations belong to the field walk, not the catalog walk.
-      if (element["/Subtype"] !== "/Widget") {
-        traverseDict(element, walk, { walk: "catalog", ...PLAIN }, objKey);
-      }
-      return;
-    }
-    if (typeof element === "string" && OBJECT_REF.test(element)) {
-      const target = objectNode(walk.objects[`obj:${element}`]);
-      if (isDict(target) && target["/Subtype"] === "/Widget") return;
-      visitObject(element, walk, { walk: "catalog", ...PLAIN });
-      return;
-    }
-    traverseNode(element, walk, { walk: "catalog", ...PLAIN }, objKey);
+    traverseCatalogAnnotation(element, walk, objKey);
   };
   if (typeof value === "string" && OBJECT_REF.test(value)) {
     const key = `obj:${value}`;
@@ -476,7 +516,13 @@ function traverseAdditionalActions(
     return;
   }
   if (typeof value === "string" && OBJECT_REF.test(value)) {
-    visitObject(value, walk, { walk: name, action: false, aaMap: true, appearance: false });
+    visitObject(value, walk, {
+      walk: name,
+      action: false,
+      aaMap: true,
+      appearance: false,
+      structure: false
+    });
     return;
   }
   traverseNode(value, walk, { walk: name, ...PLAIN }, objKey);
@@ -512,6 +558,13 @@ function traverseDict(
   if (dict["/Type"] === "/Filespec" || "/EF" in dict || "/EmbeddedFiles" in dict) {
     recordFinding(walk, ctx.walk, objKey, "embedded-files");
   }
+  // Structure-tree membership comes from the walk context, not the dict's
+  // contents: reached through /StructTreeRoot or typed /StructElem. A
+  // dict that merely looks like an attribute object elsewhere keeps the
+  // ordinary reading, and the /S allowlist above still fires inside the
+  // tree, so an action cannot hide behind a structure /A.
+  const inStructure =
+    ctx.structure || dict["/Type"] === "/StructElem" || dict["/Type"] === "/StructTreeRoot";
   for (const [key, value] of Object.entries(dict)) {
     // Ownership edges (KTD4): the form dictionary's field edge and a page's
     // widget annotations belong to the field walk; a widget's /P edge back
@@ -520,6 +573,17 @@ function traverseDict(
     if (ctx.walk === "field" && key === "/P") continue;
     if (key === "/Annots" && ctx.walk === "catalog") {
       traverseAnnotations(value, walk, objKey);
+      continue;
+    }
+    if (key === "/StructTreeRoot" || (inStructure && (key === "/K" || key === "/A"))) {
+      traverseNode(value, walk, { walk: ctx.walk, ...PLAIN, structure: true }, objKey);
+      continue;
+    }
+    // A structure element can reference an annotation object through an
+    // OBJR (PDF 32000 §14.7.4.4); a widget so reached is field-owned the
+    // same way a page /Annots entry is.
+    if (key === "/Obj" && dict["/Type"] === "/OBJR" && ctx.walk === "catalog") {
+      traverseCatalogAnnotation(value, walk, objKey);
       continue;
     }
     if (key === "/AA") {
